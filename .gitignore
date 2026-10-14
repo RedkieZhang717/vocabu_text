@@ -1,0 +1,8 @@
+node_modules/
+.npm-cache/
+__pycache__/
+*.xpi
+.env
+.env.*
+artifacts/
+.test-profile/

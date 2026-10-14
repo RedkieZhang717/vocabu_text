@@ -1,0 +1,45 @@
+name: Test and release
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - run: npm ci --ignore-scripts
+      - run: npm run check && npm test
+      - run: python build-xpi.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zotero-vocab-book
+          path: |
+            zotero-vocab-book.xpi
+            update.json
+      - name: Publish a new version
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          VERSION=$(node -p "require('./manifest.json').version")
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            echo "Version v$VERSION already exists; leaving it unchanged."
+            exit 0
+          fi
+          gh release create "v$VERSION" zotero-vocab-book.xpi update.json --target "$GITHUB_SHA" --title "v$VERSION" --notes-file CHANGELOG.md --draft
+          gh release edit "v$VERSION" --draft=false --latest

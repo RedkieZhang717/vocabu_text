@@ -1,0 +1,20 @@
+{
+  "manifest_version": 2,
+  "name": "Zotero Vocab Book Pro",
+  "version": "2.2.9",
+  "description": "集成百度翻译API与词典音标，支持长句翻译提词、上下文原句绑定、PDF页码跳转、熟练度分级与闪卡背单词。",
+  "author": "Redkie",
+  "homepage_url": "https://github.com/Redkie/zotero-vocab-book",
+  "icons": {
+    "48": "icons/icon.svg",
+    "96": "icons/icon.svg"
+  },
+  "applications": {
+    "zotero": {
+      "id": "vocab-book@custom.zotero.org",
+      "update_url": "https://github.com/Redkie/zotero-vocab-book/releases/latest/download/update.json",
+      "strict_min_version": "6.999",
+      "strict_max_version": "10.*"
+    }
+  }
+}

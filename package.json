@@ -1,0 +1,14 @@
+{
+  "name": "zotero-vocab-book",
+  "version": "2.2.9",
+  "private": true,
+  "scripts": {
+    "test": "node --test --test-isolation=none tests/*.test.cjs",
+    "check": "node --check bootstrap.js"
+  },
+  "devDependencies": {
+    "@fluent/bundle": "^0.19.1",
+    "@fluent/dom": "^0.10.0",
+    "jsdom": "^26.1.0"
+  }
+}
