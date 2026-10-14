@@ -1,0 +1,27 @@
+<vbox xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+      xmlns:html="http://www.w3.org/1999/xhtml"
+      id="vocab-book-settings" onload="VocabBookPreferences.init()">
+  <groupbox>
+    <label><html:h2>百度翻译</html:h2></label>
+    <html:p>填写百度翻译开放平台的 APP ID 和密钥。已有配置会自动沿用。</html:p>
+    <html:label for="vocab-appid">APP ID</html:label>
+    <html:input id="vocab-appid" type="text" autocomplete="off" />
+    <html:label for="vocab-secret">密钥</html:label>
+    <html:input id="vocab-secret" type="password" autocomplete="off" />
+    <html:div class="vocab-actions">
+      <html:button id="vocab-save" type="button">保存配置</html:button>
+      <html:button id="vocab-test" type="button">保存并测试连接</html:button>
+    </html:div>
+    <html:p id="vocab-status" role="status" aria-live="polite"></html:p>
+  </groupbox>
+  <groupbox>
+    <label><html:h2>阅读与查词</html:h2></label>
+    <html:label class="vocab-check"><html:input id="vocab-popup" type="checkbox" />启用 PDF 划词弹窗</html:label>
+    <html:label class="vocab-check"><html:input id="vocab-dictionary" type="checkbox" />使用有道词典补充音标和释义</html:label>
+    <html:p>选项立即生效。划选句子后，可点选多个单词，分别入库并保留例句和页码。短语仍可整体收录。</html:p>
+  </groupbox>
+  <groupbox>
+    <label><html:h2>数据</html:h2></label>
+    <html:p>生词和密钥保存在本机 Zotero 配置中。翻译内容会发送至百度；启用词典时，查询词会发送至有道。点击发音时，有道会收到对应词语。</html:p>
+  </groupbox>
+</vbox>

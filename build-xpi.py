@@ -23,6 +23,9 @@ XPI_PATH = os.path.join(SRC_DIR, "zotero-vocab-book.xpi")
 TEXT_FILES = [
     "manifest.json",
     "bootstrap.js",
+    "preferences.xhtml",
+    "preferences.js",
+    "preferences.css",
     "locale/en-US/vocab-book-ui.ftl",
     "locale/zh-CN/vocab-book-ui.ftl",
 ]

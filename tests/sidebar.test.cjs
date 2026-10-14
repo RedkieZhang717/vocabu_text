@@ -16,6 +16,7 @@ function harness(words = []) {
       Prefs: { get: key => prefs.get(key), set: (key, value) => prefs.set(key, value) },
       debug() {}, initializationPromise: Promise.resolve(), getMainWindows: () => [],
       Items: { get: () => null },
+      PreferencePanes: { register: async options => options.id, unregister() {} },
       HTTP: { request: async () => ({ response: { trans_result: [{ dst: '测试' }] } }) },
       ItemPaneManager: { registerSection: options => { hooks = options; return 'test-pane'; }, unregisterSection() {} },
       Reader: { registerEventListener() {} },
@@ -119,4 +120,71 @@ test('export escapes HTML and MD5 handles UTF-8', () => {
   const { context } = harness();
   assert.equal(context.escapeExportHTML('<script>&'), '&lt;script&gt;&amp;');
   assert.equal(context.md5('中文'), require('node:crypto').createHash('md5').update('中文').digest('hex'));
+});
+
+test('batch tokens preserve hyphens and contractions and remove duplicates', () => {
+  const { context } = harness();
+  assert.deepEqual(Array.from(context.extractWords("To side-step, namely: side-step. Don't don't")), ['To', 'side-step', 'namely', "Don't"]);
+});
+
+test('batch collection saves separate entries with shared context and retries only failures', async () => {
+  const { context } = harness([word('old')]);
+  const shared = { contextSentence: 'We side-step this, namely uncertainty.', contextTrans: '例句译文', itemID: 3, attachmentID: 4, pageIndex: 8 };
+  const options = { delay: async () => {}, lookup: async value => ({ ok: value !== 'namely', combinedMeaning: '独立释义' }) };
+  const result = await context.collectWords(['side-step', 'namely', 'SIDE-STEP'], shared, options);
+  assert.equal(result.saved.length, 1);
+  assert.equal(result.failed[0], 'namely');
+  assert.equal(context.getVocabList().length, 2);
+  const entry = context.getVocabList()[0];
+  for (const [key, value] of Object.entries(shared)) assert.equal(entry[key], value);
+  assert.equal(entry.meaning, '独立释义');
+  options.lookup = async () => ({ ok: true, combinedMeaning: '即' });
+  await context.collectWords(result.failed, shared, options);
+  assert.equal(context.getVocabList().length, 3);
+  assert.equal(context.getVocabList()[0].word, 'namely');
+});
+
+test('picker awaits sentence translation, saves chosen words and retains failures', async () => {
+  const { context, dom } = harness();
+  const box = dom.window.document.createElement('div');
+  let release;
+  let received;
+  context.collectWords = async (words, shared) => {
+    received = { words: Array.from(words), shared };
+    return { saved: ['side-step'], failed: ['namely'] };
+  };
+  const ready = new Promise(resolve => { release = resolve; });
+  context.appendWordPicker(dom.window.document, box, 'We side-step, namely this problem.', () => ({ contextTrans: '译文' }), ready);
+  button(box, 'side-step').click(); button(box, 'namely').click();
+  const save = button(box, '加入 2'); save.click();
+  assert.equal(received, undefined);
+  assert.equal(save.disabled, true);
+  release(); await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(received.words, ['side-step', 'namely']);
+  assert.equal(received.shared.contextTrans, '译文');
+  assert.equal(button(box, 'side-step').getAttribute('aria-pressed'), 'false');
+  assert.equal(button(box, 'namely').getAttribute('aria-pressed'), 'true');
+  assert.match(box.querySelector('[role=status]').textContent, /未保存：namely/);
+});
+
+test('preferences load existing credentials, validate edits and save options without touching words', () => {
+  const { context, prefs } = harness([word('old')]);
+  const dom = new JSDOM(fs.readFileSync('preferences.xhtml', 'utf8'), { contentType: 'application/xhtml+xml' });
+  prefs.set('extensions.vocabbook.baiduKey', '123#existing-secret');
+  context.document = dom.window.document;
+  context.window = dom.window;
+  context.Zotero.VocabBook = { getBaiduCredentials: context.getBaiduCredentials, translateWithBaidu: context.translateWithBaidu };
+  vm.runInContext(fs.readFileSync('preferences.js', 'utf8'), context);
+  dom.window.VocabBookPreferences.init();
+  const get = id => dom.window.document.getElementById(id);
+  assert.equal(get('vocab-secret').value, 'existing-secret');
+  assert.equal(get('vocab-secret').type, 'password');
+  get('vocab-appid').value = 'invalid'; get('vocab-save').click();
+  assert.equal(prefs.get('extensions.vocabbook.baiduKey'), '123#existing-secret');
+  get('vocab-appid').value = '456'; get('vocab-save').click();
+  assert.equal(prefs.get('extensions.vocabbook.baiduKey'), '456#existing-secret');
+  get('vocab-popup').checked = false;
+  get('vocab-popup').dispatchEvent(new dom.window.Event('change'));
+  assert.equal(prefs.get('extensions.vocabbook.selectionPopup'), false);
+  assert.equal(context.getVocabList()[0].word, 'old');
 });

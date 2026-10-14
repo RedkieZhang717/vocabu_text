@@ -1,9 +1,17 @@
 var registeredSectionID = null;
+var registeredPreferencesID = null;
 var activeSidebarContainers = new Set();
 
 const PLUGIN_ID = "vocab-book@custom.zotero.org";
 const PREF_WORDS = "extensions.vocabbook.words";
 const PREF_BAIDU_KEY = "extensions.vocabbook.baiduKey";
+const PREF_POPUP = "extensions.vocabbook.selectionPopup";
+const PREF_DICTIONARY = "extensions.vocabbook.dictionary";
+const PREFERENCES_ID = "vocab-book-preferences";
+
+function isPreferenceEnabled(key) {
+  return Zotero.Prefs.get(key, true) !== false;
+}
 
 // ==========================================
 // 1. 工具函数：DOM 创建、纯正 UTF-8 MD5 与剪贴板兼容
@@ -189,11 +197,11 @@ async function fetchWordRichInfo(word) {
 
   const [baiduRes, dictRes] = await Promise.allSettled([
     translateWithBaidu(clean),
-    requestJSON(
+    isPreferenceEnabled(PREF_DICTIONARY) ? requestJSON(
       `https://dict.youdao.com/jsonapi?q=${encodeURIComponent(
         clean
       )}&dicts={"count":1,"dicts":[["ec"]]}`
-    ),
+    ) : Promise.resolve(null),
   ]);
 
   if (dictRes.status === "fulfilled" && dictRes.value) {
@@ -226,7 +234,90 @@ async function fetchWordRichInfo(word) {
     combinedMeaning = baiduText || dictExplain || "暂无释义";
   }
 
-  return { phonetic, baiduText, dictExplain, combinedMeaning };
+  return { phonetic, baiduText, dictExplain, combinedMeaning, ok: !!(baiduText || dictExplain) };
+}
+
+// Keep hyphenated words and contractions intact, deduplicating case-insensitively.
+function extractWords(text) {
+  const seen = new Set();
+  return (String(text).match(/[A-Za-z]+(?:[-’'][A-Za-z]+)*/g) || []).filter(word => {
+    const key = word.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+async function collectWords(words, context, { lookup = fetchWordRichInfo,
+  delay = () => new Promise(resolve => setTimeout(resolve, 1100)), onProgress = () => {} } = {}) {
+  const result = { saved: [], failed: [] };
+  const unique = [...new Map(words.map(word => [word.trim().toLowerCase(), word.trim()])).values()].filter(Boolean);
+  for (const word of unique) {
+    // Allow standard Baidu accounts (one request per second) to collect a batch.
+    await delay();
+    try {
+      const info = await lookup(word);
+      if (!info.ok) throw new Error("释义查询失败，请检查网络或翻译配置");
+      addOrUpdateWord({ ...context, word, phonetic: info.phonetic, meaning: info.combinedMeaning });
+      result.saved.push(word);
+    } catch (error) {
+      result.failed.push(word);
+    }
+    onProgress(result.saved.length + result.failed.length, unique.length);
+  }
+  return result;
+}
+
+function appendWordPicker(doc, box, text, getContext, ready = Promise.resolve()) {
+  const picker = createHTML(doc, "div", { display: "flex", flexDirection: "column", gap: "6px" });
+  picker.dataset.vocabWordPicker = "true";
+  const label = createHTML(doc, "div");
+  label.textContent = "点选多个生词，分别保存并保留原句：";
+  picker.appendChild(label);
+  const chips = createHTML(doc, "div", { display: "flex", flexWrap: "wrap", gap: "4px", maxHeight: "140px", overflowY: "auto" });
+  const selected = new Set();
+  const buttons = new Map();
+  const status = createHTML(doc, "div", { fontSize: "11px" }, { role: "status", "aria-live": "polite" });
+  const save = createHTML(doc, "button", { padding: "5px 8px", backgroundColor: "#247a3c", color: "white", border: "none", borderRadius: "4px" });
+  const update = () => {
+    for (const [word, button] of buttons) {
+      const checked = selected.has(word);
+      button.setAttribute("aria-pressed", String(checked));
+      button.style.backgroundColor = checked ? "#0066cc" : "transparent";
+      button.style.color = checked ? "white" : "inherit";
+    }
+    save.disabled = selected.size === 0;
+    save.textContent = `加入 ${selected.size} 个生词（保留原句）`;
+  };
+  for (const word of extractWords(text)) {
+    const chip = createHTML(doc, "button", { padding: "2px 6px", border: "1px solid #aaa", borderRadius: "4px" }, { "aria-pressed": "false" });
+    chip.textContent = word;
+    chip.addEventListener("click", () => { selected.has(word) ? selected.delete(word) : selected.add(word); update(); });
+    buttons.set(word, chip);
+    chips.appendChild(chip);
+  }
+  save.addEventListener("click", async () => {
+    if (save.disabled) return;
+    save.disabled = true;
+    for (const button of buttons.values()) button.disabled = true;
+    status.textContent = "正在获取译文与释义…";
+    try {
+      await ready;
+      const result = await collectWords([...selected], getContext(), {
+        onProgress: (done, total) => { status.textContent = `正在入库 ${done}/${total}…`; },
+      });
+      for (const word of result.saved) selected.delete(word);
+      status.textContent = `已保存 ${result.saved.length} 个生词。` + (result.failed.length ? `未保存：${result.failed.join('、')}。可重试。` : "");
+    } catch (error) {
+      status.textContent = "收录失败，请重试。";
+    } finally {
+      for (const button of buttons.values()) button.disabled = false;
+      update();
+    }
+  });
+  picker.append(chips, save, status);
+  box.appendChild(picker);
+  update();
 }
 
 // ==========================================
@@ -484,10 +575,9 @@ function renderSidebarView(state) {
 
   const settingBtn = createHTML(doc, "button", btnStyle);
   settingBtn.textContent = "⚙️";
-  settingBtn.title = "配置百度翻译 API 密钥";
+  settingBtn.title = "打开生词本设置";
   settingBtn.addEventListener("click", () => {
-    state.showSettings = !state.showSettings;
-    renderSidebarContent(state);
+    Zotero.Utilities.Internal.openPreferences(PREFERENCES_ID);
   });
 
   const helpBtn = createHTML(doc, "button", btnStyle);
@@ -504,56 +594,6 @@ function renderSidebarView(state) {
   navBar.appendChild(settingBtn);
   navBar.appendChild(helpBtn);
   wrapper.appendChild(navBar);
-
-  if (state.showSettings) {
-    const settingBox = createHTML(doc, "div", {
-      padding: "8px",
-      borderRadius: "6px",
-      border: "1px dashed #0066cc",
-      display: "flex",
-      flexDirection: "column",
-      gap: "6px",
-      backgroundColor: "rgba(0,102,204,0.05)",
-    });
-
-    const label = createHTML(doc, "div", {
-      fontSize: "11px",
-      fontWeight: "bold",
-    });
-    label.textContent = "🔑 百度翻译 API 密钥 (格式: APPID#密钥)";
-
-    const keyInput = createHTML(
-      doc,
-      "input",
-      {
-        padding: "4px",
-        borderRadius: "4px",
-        border: "1px solid #ccc",
-        fontSize: "11px",
-      },
-      { type: "password", autocomplete: "off", value: getBaiduCredentials().raw }
-    );
-
-    const saveKeyBtn = createHTML(doc, "button", {
-      ...btnStyle,
-      backgroundColor: "#0066cc",
-      color: "#fff",
-    });
-    saveKeyBtn.textContent = "保存并测试百度 API";
-    saveKeyBtn.addEventListener("click", async () => {
-      Zotero.Prefs.set(PREF_BAIDU_KEY, keyInput.value.trim(), true);
-      saveKeyBtn.textContent = "⏳ 正在测试连接...";
-      const testRes = await translateWithBaidu("deep learning");
-      saveKeyBtn.textContent = testRes.ok
-        ? `✅ 测试成功: "${testRes.text}"`
-        : `❌ 失败: ${testRes.text}`;
-    });
-
-    settingBox.appendChild(label);
-    settingBox.appendChild(keyInput);
-    settingBox.appendChild(saveKeyBtn);
-    wrapper.appendChild(settingBox);
-  }
 
   if (state.showHelp) {
     const helpBox = createHTML(doc, "div", {
@@ -1118,7 +1158,12 @@ function uninstall() {}
 
 async function startup({ id, version, rootURI }) {
   await Zotero.initializationPromise;
-  getBaiduCredentials();
+  Zotero.VocabBook = { getBaiduCredentials, translateWithBaidu };
+  registeredPreferencesID = await Zotero.PreferencePanes.register({
+    pluginID: PLUGIN_ID, id: PREFERENCES_ID, label: "生词本",
+    src: "preferences.xhtml", scripts: ["preferences.js"], stylesheets: ["preferences.css"],
+    image: "icons/icon.svg", helpURL: "https://github.com/RedkieZhang717/vocabu_text",
+  });
 
   for (let win of Zotero.getMainWindows()) {
     if (win.MozXULElement) {
@@ -1162,7 +1207,6 @@ async function startup({ id, version, rootURI }) {
           masteryFilter: -1,
           sortBy: "date",
           searchQuery: "",
-          showSettings: false,
           showHelp: false,
           flashcardIndex: 0,
           flashcardFlipped: false,
@@ -1179,6 +1223,7 @@ async function startup({ id, version, rootURI }) {
   Zotero.Reader.registerEventListener(
     "renderTextSelectionPopup",
     async (event) => {
+      if (!isPreferenceEnabled(PREF_POPUP)) return;
       const { reader, doc, params, append } = event;
       const selectedText = (params?.annotation?.text || "")
         .replace(/\s+/g, " ")
@@ -1278,22 +1323,36 @@ async function startup({ id, version, rootURI }) {
         box.appendChild(saveBtn);
         append(box);
 
-        let info = { phonetic: "", combinedMeaning: "待查询释义" };
-        saveBtn.addEventListener("click", () => {
-          addOrUpdateWord({
-            word: selectedText,
-            phonetic: info.phonetic,
-            meaning: info.combinedMeaning,
-            contextSentence: ctxInput.value.trim(),
-            sourceTitle: paperTitle,
-            itemID: parentID,
-            attachmentID,
-            pageIndex,
-          });
-          saveBtn.textContent = "✅ 已收入生词本 (含页码定位)";
-          saveBtn.style.backgroundColor = "#6c757d";
+        const infoPromise = fetchWordRichInfo(selectedText);
+        if (extractWords(selectedText).length > 1) {
+          appendWordPicker(doc, box, selectedText, () => ({
+            contextSentence: ctxInput.value.trim() || selectedText,
+            sourceTitle: paperTitle, itemID: parentID, attachmentID, pageIndex,
+          }), infoPromise);
+        }
+        saveBtn.addEventListener("click", async () => {
+          if (saveBtn.disabled) return;
+          saveBtn.disabled = true;
+          try {
+            const info = await infoPromise;
+            addOrUpdateWord({
+              word: selectedText,
+              phonetic: info.phonetic,
+              meaning: info.combinedMeaning,
+              contextSentence: ctxInput.value.trim(),
+              sourceTitle: paperTitle,
+              itemID: parentID,
+              attachmentID,
+              pageIndex,
+            });
+            saveBtn.textContent = "✅ 已收入生词本 (含页码定位)";
+            saveBtn.style.backgroundColor = "#6c757d";
+          } catch (error) {
+            saveBtn.disabled = false;
+            saveBtn.textContent = "收录失败，请检查生词数据后重试";
+          }
         });
-        info = await fetchWordRichInfo(selectedText);
+        const info = await infoPromise;
         if (info.phonetic) titleSpan.textContent = `${selectedText} ${info.phonetic} 🔊`;
         defText.textContent = info.combinedMeaning;
       } else {
@@ -1318,66 +1377,14 @@ async function startup({ id, version, rootURI }) {
         transBox.textContent = "⏳ 正在请求百度翻译 API...";
         box.appendChild(transBox);
 
-        const extractRow = createHTML(doc, "div", {
-          display: "flex",
-          gap: "4px",
-          marginTop: "2px",
-        });
-        const pickInput = createHTML(
-          doc,
-          "input",
-          {
-            flex: "1 1 120px",
-            padding: "3px 5px",
-            borderRadius: "4px",
-            border: "1px solid #ccc",
-            fontSize: "11px",
-          },
-          { type: "text", placeholder: "输入此句中的生词..." }
-        );
-        const pickBtn = createHTML(doc, "button", {
-          padding: "3px 7px",
-          cursor: "pointer",
-          borderRadius: "4px",
-          border: "none",
-          backgroundColor: "#28a745",
-          color: "#fff",
-          fontSize: "11px",
-        });
-        pickBtn.textContent = "➕连同原句入库";
-
-        extractRow.appendChild(pickInput);
-        extractRow.appendChild(pickBtn);
-        box.appendChild(extractRow);
-        append(box);
-
         let baiduRes = { ok: false, text: "" };
-
-        pickBtn.addEventListener("click", async () => {
-          const targetWord = pickInput.value.trim();
-          if (!targetWord || pickBtn.disabled) return;
-          pickBtn.disabled = true;
-          pickBtn.textContent = "入库中...";
-          const wordInfo = await fetchWordRichInfo(targetWord);
-          addOrUpdateWord({
-            word: targetWord,
-            phonetic: wordInfo.phonetic,
-            meaning: wordInfo.combinedMeaning,
-            contextSentence: selectedText,
-            contextTrans: baiduRes.ok ? baiduRes.text : "",
-            sourceTitle: paperTitle,
-            itemID: parentID,
-            attachmentID,
-            pageIndex,
-          });
-          pickBtn.disabled = false;
-          pickBtn.textContent = "✅ 已绑原句入库";
-          pickInput.value = "";
-          setTimeout(() => {
-            pickBtn.textContent = "➕连同原句入库";
-          }, 1500);
-        });
-        baiduRes = await translateWithBaidu(selectedText);
+        const translation = translateWithBaidu(selectedText).then(result => { baiduRes = result; });
+        appendWordPicker(doc, box, selectedText, () => ({
+          contextSentence: selectedText, contextTrans: baiduRes.ok ? baiduRes.text : "",
+          sourceTitle: paperTitle, itemID: parentID, attachmentID, pageIndex,
+        }), translation);
+        append(box);
+        await translation;
         transBox.textContent = baiduRes.text;
       }
     },
@@ -1400,5 +1407,10 @@ function shutdown() {
     Zotero.ItemPaneManager.unregisterSection(registeredSectionID);
     registeredSectionID = null;
   }
+  if (registeredPreferencesID) {
+    Zotero.PreferencePanes.unregister(registeredPreferencesID);
+    registeredPreferencesID = null;
+  }
+  delete Zotero.VocabBook;
   activeSidebarContainers.clear();
 }

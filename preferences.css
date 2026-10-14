@@ -1,0 +1,11 @@
+#vocab-book-settings { max-width: 640px; min-width: 0; }
+#vocab-book-settings * { box-sizing: border-box; }
+#vocab-book-settings groupbox { margin: 0 0 20px; }
+#vocab-book-settings h2 { font-size: 16px; margin: 8px 0; }
+#vocab-book-settings p { line-height: 1.6; margin: 8px 0; }
+#vocab-book-settings input[type="text"],
+#vocab-book-settings input[type="password"] { width: 100%; max-width: 440px; padding: 6px 8px; margin: 4px 0 12px; }
+#vocab-book-settings .vocab-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+#vocab-book-settings button { padding: 6px 12px; }
+#vocab-book-settings .vocab-check { display: flex; align-items: center; gap: 8px; margin: 8px 0; line-height: 1.5; }
+#vocab-book-settings #vocab-status { min-height: 1.6em; overflow-wrap: anywhere; }

@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Zotero Vocab Book Pro",
-  "version": "2.2.9",
+  "version": "2.3.0",
   "description": "集成百度翻译API与词典音标，支持长句翻译提词、上下文原句绑定、PDF页码跳转、熟练度分级与闪卡背单词。",
   "author": "RedkieZhang717",
   "homepage_url": "https://github.com/RedkieZhang717/vocabu_text",
