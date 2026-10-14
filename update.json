@@ -4,8 +4,8 @@
       "updates": [
         {
           "version": "2.2.9",
-          "update_link": "https://github.com/Redkie/zotero-vocab-book/releases/download/v2.2.9/zotero-vocab-book.xpi",
-          "update_hash": "sha256:207173007824434c28ed2d43cf0a14f88ff6acb7e9a8ba1639929a2592528f58",
+          "update_link": "https://github.com/RedkieZhang717/vocabu_text/releases/download/v2.2.9/zotero-vocab-book.xpi",
+          "update_hash": "sha256:c0792a8416aa40c564e3fe6020059aaf6909f0cbb9c22a1f70b8b35d2184f83d",
           "applications": {
             "zotero": {
               "strict_min_version": "6.999",
