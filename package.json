@@ -1,6 +1,6 @@
 {
   "name": "zotero-vocab-book",
-  "version": "2.5.0",
+  "version": "2.5.1",
   "private": true,
   "scripts": {
     "test": "node --test --test-isolation=none tests/*.test.cjs",
@@ -10,5 +10,20 @@
     "@fluent/bundle": "^0.19.1",
     "@fluent/dom": "^0.10.0",
     "jsdom": "^26.1.0"
-  }
+  },
+  "description": "面向 Zotero 的多功能单词本：划词与批量收录、可选翻译、原词定位、释义纠错、闪卡复习、Anki 导出，以及文献阅读卡片和笔记。",
+  "homepage": "https://github.com/RedkieZhang717/vocabu_text#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/RedkieZhang717/vocabu_text.git"
+  },
+  "bugs": {
+    "url": "https://github.com/RedkieZhang717/vocabu_text/issues"
+  },
+  "keywords": [
+    "zotero",
+    "vocabulary",
+    "flashcards",
+    "reading-notes"
+  ]
 }

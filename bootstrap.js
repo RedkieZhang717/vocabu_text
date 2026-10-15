@@ -645,7 +645,7 @@ function renderSidebarView(state) {
   const section = body.closest("collapsible-section");
   // A label fallback also covers live upgrades while Zotero refreshes Fluent.
   if (section && !section.getAttribute("label")) {
-    section.setAttribute("label", String(Zotero.locale || "zh-CN").startsWith("zh") ? "生词本" : "Vocab Book");
+    section.setAttribute("label", String(Zotero.locale || "zh-CN").startsWith("zh") ? "多功能单词本" : "Multifunction Vocab Book");
   }
 
   const wrapper = createHTML(doc, "div", {
@@ -750,7 +750,7 @@ function renderSidebarView(state) {
 
   const settingBtn = createHTML(doc, "button", btnStyle);
   settingBtn.textContent = "⚙️";
-  settingBtn.title = "打开生词本设置";
+  settingBtn.title = "打开多功能单词本设置";
   settingBtn.addEventListener("click", () => {
     Zotero.Utilities.Internal.openPreferences(PREFERENCES_ID);
   });
@@ -784,20 +784,24 @@ function renderSidebarView(state) {
       "📖 收录生词（划词）",
       "1. 在主窗口双击文献的 PDF，用鼠标划选单词或整句",
       "2. 在浮窗里点「➕ 加入生词本」（可先填例句）",
-      "3. 短词 = 词典音标 + 翻译，长句 = 整句翻译并可提词入库",
+      "3. 整句可点选多个词分别入库；自动翻译可在设置中关闭",
       "",
       "🎴 复习（闪卡背词）",
-      "1. 在主窗口选中文献，右侧栏「生词本」里点「🎴 闪卡背词」",
+      "1. 在主窗口选中文献，右侧栏「多功能单词本」里点「🎴 闪卡背词」",
       "2. 看单词和例句先回忆，点「👀 点击显示释义与译文」翻面",
       "3. 按 🔴生疏 / 🟡模糊 / 🟢掌握 打分，自动跳下一个",
       "4. 用等级按钮只刷某一档，例如「🔴 仅生疏」反复巩固",
       "",
+      "📚 阅读管理",
+      "· 主窗口工具栏书本图标打开文献卡片，可标记已读、展开生词和保存笔记",
+      "· 笔记保存在本机，关闭窗口前请保存；详细教程可在设置页打开",
+      "",
       "💡 其他",
       "· 顶部输入框可手动查词入库（不用打开 PDF）",
       "· 「📚 全部生词/📖 当前文献」切换范围，「🔍」搜索，「🕒最新/🔥生疏优先/🔤A-Z」排序",
-      "· 「📤 导出 Anki」把全部生词按 正面(TAB)背面 复制到剪贴板，可直接粘进 Anki",
+      "· 「📤 导出 Anki」按当前文献/全部生词范围复制 TSV，保存为 UTF-8 文本后导入 Anki",
       "· 卡片上的 🔴🟡🟢 徽章点一下改熟练度，「✖」删除",
-      "· 带「📍 P.x 跳转」的词条可回到 PDF 对应页",
+      "· 「定位原词」回到 PDF 并尝试高亮；无字符位置时可能只到选区或页码",
     ].join("\n");
     wrapper.appendChild(helpBox);
   }
@@ -1157,7 +1161,7 @@ function renderSidebarView(state) {
           "1️⃣ 在主窗口双击文献的 PDF 打开阅读器",
           "2️⃣ 用鼠标划选单词（≤4 词）或整句",
           "3️⃣ 在浮窗里点「➕ 加入生词本」",
-          "4️⃣ 回主窗口选中该文献 → 右侧栏「生词本」",
+          "4️⃣ 回主窗口选中该文献 → 右侧栏「多功能单词本」",
           "",
           "🎴 复习：点上面的「🎴 闪卡背词」，翻面后按 🔴🟡🟢 打分",
           "❓ 详细说明点右上角「❓」；本框也可直接输入单词回车入库",
@@ -1344,9 +1348,9 @@ async function startup({ id, version, rootURI }) {
   }
   Zotero.VocabBook = { getBaiduCredentials, translateWithBaidu };
   registeredPreferencesID = await Zotero.PreferencePanes.register({
-    pluginID: PLUGIN_ID, id: PREFERENCES_ID, label: "生词本",
+    pluginID: PLUGIN_ID, id: PREFERENCES_ID, label: "多功能单词本",
     src: "preferences.xhtml", scripts: ["preferences.js"], stylesheets: ["preferences.css"],
-    image: "icons/icon.svg", helpURL: "https://github.com/RedkieZhang717/vocabu_text",
+    image: "icons/icon.svg", helpURL: "https://github.com/RedkieZhang717/vocabu_text/blob/main/docs/USER_GUIDE.md",
   });
 
   for (let win of Zotero.getMainWindows()) {

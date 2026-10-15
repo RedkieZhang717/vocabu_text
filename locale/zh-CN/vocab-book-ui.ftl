@@ -1,4 +1,4 @@
 vocab-book-section-header =
-    .label = 生词本
+    .label = 多功能单词本
 vocab-book-section-sidenav =
-    .tooltiptext = 学术生词本
+    .tooltiptext = 多功能单词本：收录、纠错与闪卡复习

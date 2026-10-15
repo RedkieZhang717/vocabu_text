@@ -1,4 +1,4 @@
 vocab-book-section-header =
-    .label = Vocab Book
+    .label = Multifunction Vocab Book
 vocab-book-section-sidenav =
-    .tooltiptext = Academic vocabulary book
+    .tooltiptext = Multifunction Vocab Book: collect, edit and review words

@@ -1,8 +1,8 @@
 {
   "manifest_version": 2,
-  "name": "Zotero Vocab Book Pro",
-  "version": "2.5.0",
-  "description": "论文阅读管理与生词本：多词收录、原词定位、手动纠错、闪卡复习、阅读进度与笔记，支持可选百度翻译。",
+  "name": "多功能单词本",
+  "version": "2.5.1",
+  "description": "面向 Zotero 的多功能单词本：划词与批量收录、可选翻译、原词定位、释义纠错、闪卡复习、Anki 导出，以及文献阅读卡片和笔记。",
   "author": "RedkieZhang717",
   "homepage_url": "https://github.com/RedkieZhang717/vocabu_text",
   "icons": {

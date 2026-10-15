@@ -2,6 +2,9 @@ var VocabBookPreferences = {
   init() {
     const doc = document;
     const api = Zotero.VocabBook;
+    doc.getElementById("vocab-guide").addEventListener("click", () => {
+      Zotero.launchURL("https://github.com/RedkieZhang717/vocabu_text/blob/main/docs/USER_GUIDE.md");
+    });
     const credentials = api.getBaiduCredentials();
     doc.getElementById("vocab-appid").value = credentials.appid;
     doc.getElementById("vocab-secret").value = credentials.secret;
