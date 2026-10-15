@@ -569,7 +569,7 @@ async function resolveWordPosition(reader, word, selection, contextSentence = ""
 }
 
 async function openWordLocation(entry) {
-  if (!entry.attachmentID) return;
+  if (!entry.attachmentID) return false;
   const page = typeof entry.pageIndex === "number" ? entry.pageIndex : 0;
   try {
     const reader = await Zotero.Reader.open(entry.attachmentID, { pageIndex: page }, {
@@ -579,8 +579,10 @@ async function openWordLocation(entry) {
       const position = await resolveWordPosition(reader, entry.word, entry.position || { pageIndex: page }, entry.contextSentence);
       await reader.navigate(position?.rects?.length ? { position } : { pageIndex: page });
     }
+    return Boolean(reader);
   } catch (e) {
     Zotero.debug("[VocabBook] 跳转 PDF 失败: " + e);
+    return false;
   }
 }
 
@@ -1336,7 +1338,7 @@ function uninstall() {}
 async function startup({ id, version, rootURI }) {
   await Zotero.initializationPromise;
   if (rootURI) {
-    const scope = { Zotero };
+    const scope = { Zotero, stylesheetURI: rootURI + "reading-dashboard.css" };
     Services.scriptloader.loadSubScript(rootURI + "reading-dashboard.js", scope);
     readingDashboard = scope.VocabBookReadingDashboard;
   }
