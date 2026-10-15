@@ -31,7 +31,7 @@ var VocabBookPreferences = {
         event.target.disabled = false;
       }
     });
-    for (const [id, key] of [["vocab-popup", "selectionPopup"], ["vocab-dictionary", "dictionary"]]) {
+    for (const [id, key] of [["vocab-popup", "selectionPopup"], ["vocab-auto-translate", "autoTranslate"], ["vocab-dictionary", "dictionary"]]) {
       const input = doc.getElementById(id);
       const pref = `extensions.vocabbook.${key}`;
       input.checked = Zotero.Prefs.get(pref, true) !== false;

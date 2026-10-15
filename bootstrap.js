@@ -1,5 +1,6 @@
 var registeredSectionID = null;
 var registeredPreferencesID = null;
+var readingDashboard = null;
 var activeSidebarContainers = new Set();
 
 const PLUGIN_ID = "vocab-book@custom.zotero.org";
@@ -7,6 +8,7 @@ const PREF_WORDS = "extensions.vocabbook.words";
 const PREF_BAIDU_KEY = "extensions.vocabbook.baiduKey";
 const PREF_POPUP = "extensions.vocabbook.selectionPopup";
 const PREF_DICTIONARY = "extensions.vocabbook.dictionary";
+const PREF_AUTO_TRANSLATE = "extensions.vocabbook.autoTranslate";
 const PREFERENCES_ID = "vocab-book-preferences";
 
 function isPreferenceEnabled(key) {
@@ -23,15 +25,27 @@ function createHTML(doc, tag, styles = {}, attrs = {}) {
     fontFamily: "system-ui, sans-serif", overflowWrap: "anywhere",
     ...(["button", "input"].includes(tag) ? {
       fontSize: "12px", minHeight: "28px", maxWidth: "100%",
-      color: "inherit", backgroundColor: "transparent",
+      color: "ButtonText", backgroundColor: "ButtonFace",
+      ...(tag === "button" ? { appearance: "none", backgroundImage: "none" } : {}),
       ...(tag === "button" ? { whiteSpace: "normal", flexShrink: "0" } : {}),
     } : {}),
   }, styles);
-  if (tag === "button") el.setAttribute("type", "button");
+  if (tag === "button") {
+    el.setAttribute("type", "button");
+    // Zotero's native button theme can otherwise override the background alone.
+    setButtonColors(el, el.style.backgroundColor || "ButtonFace", el.style.color || "ButtonText");
+    el.style.setProperty("appearance", "none", "important");
+    el.style.setProperty("background-image", "none", "important");
+  }
   for (const [k, v] of Object.entries(attrs)) {
     el.setAttribute(k, v);
   }
   return el;
+}
+
+function setButtonColors(button, background, color) {
+  button.style.setProperty("background-color", background, "important");
+  button.style.setProperty("color", color, "important");
 }
 
 // 兼容 Zotero 10 的剪贴板写入函数
@@ -249,7 +263,8 @@ function extractWords(text) {
 }
 
 async function collectWords(words, context, { lookup = fetchWordRichInfo,
-  delay = () => new Promise(resolve => setTimeout(resolve, 1100)), onProgress = () => {} } = {}) {
+  delay = () => new Promise(resolve => setTimeout(resolve, 1100)), onProgress = () => {},
+  getPosition = async () => context.position || null } = {}) {
   const result = { saved: [], failed: [] };
   const unique = [...new Map(words.map(word => [word.trim().toLowerCase(), word.trim()])).values()].filter(Boolean);
   for (const word of unique) {
@@ -258,7 +273,7 @@ async function collectWords(words, context, { lookup = fetchWordRichInfo,
     try {
       const info = await lookup(word);
       if (!info.ok) throw new Error("释义查询失败，请检查网络或翻译配置");
-      addOrUpdateWord({ ...context, word, phonetic: info.phonetic, meaning: info.combinedMeaning });
+      addOrUpdateWord({ ...context, word, phonetic: info.phonetic, meaning: info.combinedMeaning, position: await getPosition(word) });
       result.saved.push(word);
     } catch (error) {
       result.failed.push(word);
@@ -268,7 +283,7 @@ async function collectWords(words, context, { lookup = fetchWordRichInfo,
   return result;
 }
 
-function appendWordPicker(doc, box, text, getContext, ready = Promise.resolve()) {
+function appendWordPicker(doc, box, text, getContext, ready = Promise.resolve(), { lookup = fetchWordRichInfo, getPosition, delay } = {}) {
   const picker = createHTML(doc, "div", { display: "flex", flexDirection: "column", gap: "6px" });
   picker.dataset.vocabWordPicker = "true";
   const label = createHTML(doc, "div");
@@ -283,8 +298,7 @@ function appendWordPicker(doc, box, text, getContext, ready = Promise.resolve())
     for (const [word, button] of buttons) {
       const checked = selected.has(word);
       button.setAttribute("aria-pressed", String(checked));
-      button.style.backgroundColor = checked ? "#0066cc" : "transparent";
-      button.style.color = checked ? "white" : "inherit";
+      setButtonColors(button, checked ? "#0066cc" : "ButtonFace", checked ? "white" : "ButtonText");
     }
     save.disabled = selected.size === 0;
     save.textContent = `加入 ${selected.size} 个生词（保留原句）`;
@@ -302,8 +316,9 @@ function appendWordPicker(doc, box, text, getContext, ready = Promise.resolve())
     for (const button of buttons.values()) button.disabled = true;
     status.textContent = "正在获取译文与释义…";
     try {
-      await ready;
+      await (typeof ready === "function" ? ready() : ready);
       const result = await collectWords([...selected], getContext(), {
+        lookup, getPosition, delay,
         onProgress: (done, total) => { status.textContent = `正在入库 ${done}/${total}…`; },
       });
       for (const word of result.saved) selected.delete(word);
@@ -337,6 +352,64 @@ function saveVocabList(list) {
   refreshAllSidebars();
 }
 
+function getWordLocations(entry) {
+  const locations = Array.isArray(entry.locations) ? entry.locations : [];
+  if (locations.length) return locations;
+  return entry.itemID || entry.attachmentID ? [{
+    itemID: entry.itemID, attachmentID: entry.attachmentID, pageIndex: entry.pageIndex,
+    position: entry.position || null, contextSentence: entry.contextSentence || "",
+    contextTrans: entry.contextTrans || "", source: entry.source,
+  }] : [];
+}
+
+function getWordsForPaper(words, itemID) {
+  if (!itemID) return [];
+  return words.flatMap(entry => {
+    const quality = location => location.attachmentID ? (location.position?.rects?.length ? 2 : 1) : 0;
+    const location = getWordLocations(entry).filter(location => location.itemID === itemID)
+      .reverse().sort((a, b) => quality(b) - quality(a))[0];
+    return location ? [{ ...entry, ...location }] : [];
+  });
+}
+
+function updateWordMeaning(word, meaning) {
+  const list = getVocabList();
+  const entry = list.find(entry => entry.word.toLowerCase() === word.toLowerCase());
+  if (!entry) throw new Error("该生词已被删除，请刷新后重试");
+  if (!String(meaning).trim()) throw new Error("请填写释义");
+  entry.meaning = String(meaning).trim();
+  entry.meaningEdited = true;
+  saveVocabList(list);
+}
+
+function appendMeaningEditor(doc, container, entry) {
+  const edit = createHTML(doc, "button", { alignSelf: "flex-start", fontSize: "11px", padding: "2px 7px" });
+  edit.textContent = "✎ 修改释义";
+  edit.addEventListener("click", () => {
+    if (container.querySelector('[data-vocab-meaning-editor]')) return;
+    const form = createHTML(doc, "div", { display: "flex", flexDirection: "column", gap: "5px", width: "100%" }, { "data-vocab-meaning-editor": "true" });
+    const input = createHTML(doc, "textarea", { width: "100%", minHeight: "72px", resize: "vertical", color: "FieldText", backgroundColor: "Field" }, { "aria-label": "修改生词释义", rows: "3" });
+    input.value = entry.meaning || "";
+    const status = createHTML(doc, "div", {}, { role: "status" });
+    const row = createHTML(doc, "div", { display: "flex", gap: "5px", flexWrap: "wrap" });
+    const save = createHTML(doc, "button", { backgroundColor: "#0066cc", color: "white" });
+    save.textContent = "保存释义";
+    save.addEventListener("click", () => {
+      try { updateWordMeaning(entry.word, input.value); }
+      catch (error) { status.textContent = error.message; }
+    });
+    const cancel = createHTML(doc, "button");
+    cancel.textContent = "取消";
+    cancel.addEventListener("click", () => { form.remove(); edit.disabled = false; });
+    row.append(save, cancel);
+    form.append(input, row, status);
+    container.appendChild(form);
+    edit.disabled = true;
+    input.focus();
+  });
+  container.appendChild(edit);
+}
+
 function addOrUpdateWord({
   word,
   phonetic = "",
@@ -348,28 +421,40 @@ function addOrUpdateWord({
   itemID = null,
   attachmentID = null,
   pageIndex = null,
+  position = null,
 }) {
   const cleanWord = (word || "").trim();
   if (!cleanWord) return;
+  if (Number.isInteger(position?.pageIndex)) pageIndex = position.pageIndex;
 
   const list = getVocabList();
   const idx = list.findIndex(
     (w) => w.word.toLowerCase() === cleanWord.toLowerCase()
   );
+  const old = idx >= 0 ? list[idx] : null;
+  const locations = old ? getWordLocations(old).map(location => ({ ...location })) : [];
+  if (itemID || attachmentID) {
+    const location = { itemID, attachmentID, pageIndex, position, contextSentence, contextTrans, source: sourceTitle };
+    const key = value => JSON.stringify([value.itemID, value.attachmentID, value.pageIndex, value.position, value.contextSentence]);
+    const locationIndex = locations.findIndex(value => key(value) === key(location));
+    if (locationIndex >= 0) locations[locationIndex] = location;
+    else locations.push(location);
+  }
 
   if (idx >= 0) {
-    const old = list[idx];
     list[idx] = {
       ...old,
       phonetic: phonetic || old.phonetic || "",
-      meaning: meaning || old.meaning || "暂无释义",
-      contextSentence: contextSentence || old.contextSentence || "",
-      contextTrans: contextTrans || old.contextTrans || "",
+      meaning: old.meaningEdited ? old.meaning : meaning || old.meaning || "暂无释义",
+      contextSentence: itemID || attachmentID ? contextSentence : contextSentence || old.contextSentence || "",
+      contextTrans: itemID || attachmentID ? contextTrans : contextTrans || old.contextTrans || "",
       note: note || old.note || "",
-      source: sourceTitle || old.source,
+      source: itemID || attachmentID ? sourceTitle : old.source || sourceTitle,
       itemID: itemID ?? old.itemID,
-      attachmentID: attachmentID ?? old.attachmentID,
-      pageIndex: pageIndex ?? old.pageIndex,
+      attachmentID: itemID || attachmentID ? attachmentID : old.attachmentID,
+      pageIndex: itemID || attachmentID ? pageIndex : old.pageIndex,
+      position: itemID || attachmentID ? position : old.position || null,
+      locations,
       reviewCount: (old.reviewCount || 0) + 1,
       date: new Date().toISOString().slice(0, 10),
     };
@@ -385,6 +470,8 @@ function addOrUpdateWord({
       itemID: itemID || null,
       attachmentID: attachmentID || null,
       pageIndex: pageIndex ?? null,
+      position,
+      locations,
       mastery: 0,
       reviewCount: 0,
       date: new Date().toISOString().slice(0, 10),
@@ -414,17 +501,83 @@ function removeWord(word) {
   saveVocabList(list);
 }
 
-async function jumpToPDFPage(attachmentID, pageIndex) {
-  if (!attachmentID) return;
-  const page = typeof pageIndex === "number" ? pageIndex : 0;
+function normalizePDFText(text) {
+  return String(text || "").normalize("NFKC").replace(/[’‘]/g, "'").replace(/[‐‑–]/g, "-").toLowerCase();
+}
+
+function findWordPosition(chars, word, pageIndex, rects = null, contextSentence = "") {
+  const normalize = normalizePDFText;
+  const target = normalize(word).replace(/\s+/g, " ").trim();
+  if (!target || !Array.isArray(chars)) return null;
+  const inSelection = char => {
+    if (!rects?.length) return true;
+    const r = char.rect;
+    if (!Array.isArray(r) || r.length !== 4) return false;
+    const x = (r[0] + r[2]) / 2, y = (r[1] + r[3]) / 2;
+    return rects.some(rect => x >= rect[0] - 0.5 && x <= rect[2] + 0.5 && y >= rect[1] - 0.5 && y <= rect[3] + 0.5);
+  };
+  let text = "", offsets = [], previousIndex = -1;
+  const append = (value, char) => {
+    for (const letter of value) {
+      text += letter;
+      for (let i = 0; i < letter.length; i++) offsets.push(char);
+    }
+  };
+  chars.forEach((char, index) => {
+    if (!inSelection(char)) return;
+    if (previousIndex >= 0 && index !== previousIndex + 1) append(" ", null);
+    const value = normalize(char.u);
+    for (const letter of value) {
+      if (/\s/.test(letter)) { if (!text.endsWith(" ")) append(" ", null); }
+      else append(letter, char);
+    }
+    if ((char.spaceAfter || char.lineBreakAfter || char.paragraphBreakAfter) && !text.endsWith(" ")) append(" ", null);
+    previousIndex = index;
+  });
+  let start = 0, end = text.length;
+  // Legacy entries have only a page and context; use context to disambiguate repeats.
+  if (!rects?.length && contextSentence) {
+    const context = normalize(contextSentence).replace(/\s+/g, " ").trim();
+    const contextStart = text.indexOf(context);
+    if (contextStart >= 0) { start = contextStart; end = contextStart + context.length; }
+  }
+  for (let index = text.indexOf(target, start); index >= 0 && index + target.length <= end; index = text.indexOf(target, index + 1)) {
+    const before = text[index - 1] || "", after = text[index + target.length] || "";
+    if (/[a-z'-]/i.test(before) || /[a-z'-]/i.test(after)) continue;
+    const matched = [...new Set(offsets.slice(index, index + target.length).filter(Boolean))];
+    const foundRects = matched.map(char => char.rect).filter(rect => Array.isArray(rect) && rect.length === 4 && rect.every(Number.isFinite));
+    if (foundRects.length) return { pageIndex, rects: foundRects.map(rect => Array.from(rect)) };
+  }
+  return null;
+}
+
+async function resolveWordPosition(reader, word, selection, contextSentence = "") {
+  const pageIndex = selection?.pageIndex ?? 0;
   try {
-    // Zotero.Reader.open(itemID, location, options): location is an object
-    // ({ pageIndex, annotationID, ... }), not a bare number.
-    const reader = await Zotero.Reader.open(attachmentID, { pageIndex: page }, {
+    await reader._initPromise;
+    const view = reader._internalReader?._primaryView;
+    if (!view?._pdfPages || typeof view._ensureBasicPageData !== "function") return selection || null;
+    const pages = [{ pageIndex, rects: selection?.rects }];
+    if (selection?.nextPageRects?.length) pages.push({ pageIndex: pageIndex + 1, rects: selection.nextPageRects });
+    for (const page of pages) {
+      await view._ensureBasicPageData(page.pageIndex);
+      const found = findWordPosition(view._pdfPages[page.pageIndex]?.chars, word, page.pageIndex, page.rects, contextSentence);
+      if (found) return found;
+    }
+  } catch (error) { Zotero.debug("[VocabBook] 原词定位降级到选区或页码"); }
+  return selection?.rects?.length ? selection : null;
+}
+
+async function openWordLocation(entry) {
+  if (!entry.attachmentID) return;
+  const page = typeof entry.pageIndex === "number" ? entry.pageIndex : 0;
+  try {
+    const reader = await Zotero.Reader.open(entry.attachmentID, { pageIndex: page }, {
       openInWindow: false,
     });
     if (reader && typeof reader.navigate === "function") {
-      reader.navigate({ pageIndex: page });
+      const position = await resolveWordPosition(reader, entry.word, entry.position || { pageIndex: page }, entry.contextSentence);
+      await reader.navigate(position?.rects?.length ? { position } : { pageIndex: page });
     }
   } catch (e) {
     Zotero.debug("[VocabBook] 跳转 PDF 失败: " + e);
@@ -439,6 +592,7 @@ function refreshAllSidebars() {
     if (state.body && state.body.isConnected) {
       renderSidebarContent(state);
     } else {
+      state.resizeObserver?.disconnect();
       activeSidebarContainers.delete(state);
     }
   }
@@ -448,12 +602,31 @@ function renderSidebarContent(state) {
   try {
     renderSidebarView(state);
     ensureSectionBodyVisible(state.body);
+    constrainSidebarWidth(state);
   } catch (error) {
     Zotero.debug("[VocabBook] 侧栏渲染失败: " + error);
     const message = createHTML(state.body.ownerDocument, "div", { padding: "12px" }, { role: "alert" });
     message.textContent = "生词本暂时无法显示：" + error.message;
     state.body.replaceChildren(message);
   }
+}
+
+function constrainSidebarWidth(state) {
+  const body = state.body;
+  const host = body.closest("item-details");
+  if (!host) return;
+  const view = body.ownerDocument.defaultView;
+  if (!state.resizeObserver && view?.ResizeObserver) {
+    state.resizeObserver = new view.ResizeObserver(() => constrainSidebarWidth(state));
+    state.resizeObserver.observe(host);
+  }
+  if (!host.clientWidth) return;
+  const content = body.closest(".zotero-view-item");
+  const style = content && view.getComputedStyle(content);
+  const inset = style ? parseFloat(style.paddingLeft) + parseFloat(style.paddingRight) : 0;
+  // Some Zotero context panes keep their inner flex box wider than the visible pane.
+  // Constrain our own content to the pane's measured width without changing Zotero's layout.
+  body.style.maxWidth = Math.max(0, host.clientWidth - inset) + "px";
 }
 
 function escapeExportHTML(value) {
@@ -556,7 +729,7 @@ function renderSidebarView(state) {
   const exportBtn = createHTML(doc, "button", btnStyle);
   exportBtn.textContent = "📤 导出 Anki";
   exportBtn.addEventListener("click", async () => {
-    const list = getVocabList();
+    const list = state.onlyCurrentPaper ? getWordsForPaper(getVocabList(), currentPaperID) : getVocabList();
     if (!list.length) return;
     const lines = list.map((w) => {
       const front = escapeExportHTML(w.phonetic ? `${w.word} ${w.phonetic}` : w.word).replace(/[\t\r\n]/g, " ");
@@ -628,9 +801,10 @@ function renderSidebarView(state) {
   }
 
   const allWords = getVocabList();
-  let filtered = state.onlyCurrentPaper
-    ? allWords.filter((w) => w.itemID === currentPaperID)
+  const scopedWords = state.onlyCurrentPaper
+    ? getWordsForPaper(allWords, currentPaperID)
     : allWords;
+  let filtered = [...scopedWords];
 
   if (state.masteryFilter !== -1) {
     filtered = filtered.filter((w) => (w.mastery || 0) === state.masteryFilter);
@@ -763,6 +937,7 @@ function renderSidebarView(state) {
         });
         meanEl.textContent = cur.meaning;
         ansBox.appendChild(meanEl);
+        appendMeaningEditor(doc, ansBox, cur);
 
         if (cur.contextTrans) {
           const transEl = createHTML(doc, "div", {
@@ -776,13 +951,14 @@ function renderSidebarView(state) {
 
         const rateRow = createHTML(doc, "div", {
           display: "flex",
+          flexWrap: "wrap",
           gap: "6px",
           marginTop: "6px",
         });
 
         const rateOptions = [
           { label: "🔴 生疏", level: 0, color: "#d9534f" },
-          { label: "🟡 模糊", level: 1, color: "#f0ad4e" },
+          { label: "🟡 模糊", level: 1, color: "#8a5a05" },
           { label: "🟢 掌握", level: 2, color: "#28a745" },
         ];
 
@@ -941,9 +1117,9 @@ function renderSidebarView(state) {
     display: "flex",
     justifyContent: "space-between",
   });
-  const c0 = allWords.filter((w) => (w.mastery || 0) === 0).length;
-  const c1 = allWords.filter((w) => w.mastery === 1).length;
-  const c2 = allWords.filter((w) => w.mastery === 2).length;
+  const c0 = scopedWords.filter((w) => (w.mastery || 0) === 0).length;
+  const c1 = scopedWords.filter((w) => w.mastery === 1).length;
+  const c2 = scopedWords.filter((w) => w.mastery === 2).length;
   statBar.textContent = `显示 ${filtered.length} 词 | 🔴${c0}  🟡${c1}  🟢${c2}`;
   wrapper.appendChild(statBar);
 
@@ -973,7 +1149,7 @@ function renderSidebarView(state) {
       backgroundColor: "rgba(128,128,128,0.06)",
     });
     emptyTip.textContent = allWords.length
-      ? "当前筛选/搜索条件下没有生词。\n点「📚 全部等级」或清空搜索框即可看到全部生词。"
+      ? "当前范围或筛选条件下没有生词。\n可清空搜索、切换等级，或点「当前文献」切换到全部生词。"
       : [
           "📖 还没有生词，四步开始：",
           "1️⃣ 在主窗口双击文献的 PDF 打开阅读器",
@@ -1077,6 +1253,7 @@ function renderSidebarView(state) {
       });
       meanText.textContent = itemObj.meaning;
       card.appendChild(meanText);
+      appendMeaningEditor(doc, card, itemObj);
 
       if (itemObj.contextSentence) {
         const ctxBox = createHTML(doc, "div", {
@@ -1121,10 +1298,10 @@ function renderSidebarView(state) {
         });
         const pageNum =
           typeof itemObj.pageIndex === "number" ? itemObj.pageIndex + 1 : 1;
-        jumpBtn.textContent = `📍 P.${pageNum} 跳转`;
-        jumpBtn.title = "打开对应 PDF 并跳转到该词所在页码";
+        jumpBtn.textContent = `📍 P.${pageNum} 定位原词`;
+        jumpBtn.title = "返回原词位置；旧数据将尝试在原页查找";
         jumpBtn.addEventListener("click", () =>
-          jumpToPDFPage(itemObj.attachmentID, itemObj.pageIndex)
+          openWordLocation(itemObj)
         );
         metaRow.appendChild(jumpBtn);
       }
@@ -1158,6 +1335,11 @@ function uninstall() {}
 
 async function startup({ id, version, rootURI }) {
   await Zotero.initializationPromise;
+  if (rootURI) {
+    const scope = { Zotero };
+    Services.scriptloader.loadSubScript(rootURI + "reading-dashboard.js", scope);
+    readingDashboard = scope.VocabBookReadingDashboard;
+  }
   Zotero.VocabBook = { getBaiduCredentials, translateWithBaidu };
   registeredPreferencesID = await Zotero.PreferencePanes.register({
     pluginID: PLUGIN_ID, id: PREFERENCES_ID, label: "生词本",
@@ -1169,6 +1351,7 @@ async function startup({ id, version, rootURI }) {
     if (win.MozXULElement) {
       win.MozXULElement.insertFTLIfNeeded("vocab-book-ui.ftl");
     }
+    readingDashboard?.install(win, { getVocabList, getWordsForPaper, openWordLocation });
   }
 
   const bookIcon =
@@ -1191,7 +1374,10 @@ async function startup({ id, version, rootURI }) {
     onItemChange: ({ item, setEnabled }) => setEnabled(!!item),
     onDestroy: ({ body }) => {
       for (const state of activeSidebarContainers) {
-        if (state.body === body) activeSidebarContainers.delete(state);
+        if (state.body === body) {
+          state.resizeObserver?.disconnect();
+          activeSidebarContainers.delete(state);
+        }
       }
     },
     onRender: ({ body, item }) => {
@@ -1202,7 +1388,7 @@ async function startup({ id, version, rootURI }) {
         state = {
           body,
           item,
-          onlyCurrentPaper: false,
+          onlyCurrentPaper: true,
           viewMode: "list",
           masteryFilter: -1,
           sortBy: "date",
@@ -1220,189 +1406,122 @@ async function startup({ id, version, rootURI }) {
     },
   });
 
-  Zotero.Reader.registerEventListener(
-    "renderTextSelectionPopup",
-    async (event) => {
-      if (!isPreferenceEnabled(PREF_POPUP)) return;
-      const { reader, doc, params, append } = event;
-      const selectedText = (params?.annotation?.text || "")
-        .replace(/\s+/g, " ")
-        .trim();
-      if (!selectedText || selectedText.length > 800) return;
+  Zotero.Reader.registerEventListener("renderTextSelectionPopup", renderSelectionPopup, PLUGIN_ID);
+}
 
-      let paperTitle = "PDF 文献";
-      let parentID = null;
-      const attachmentID = reader.itemID || null;
-      const pageIndex = params?.annotation?.position?.pageIndex ?? 0;
-
-      try {
-        const attItem = Zotero.Items.get(attachmentID);
-        const parentItem =
-          attItem && attItem.parentItemID
-            ? Zotero.Items.get(attItem.parentItemID)
-            : attItem;
-        if (parentItem) {
-          parentID = parentItem.id;
-          paperTitle = parentItem.getField("title") || "PDF 文献";
-        }
-      } catch (e) {}
-
-      const wordCount = selectedText.split(/\s+/).length;
-      const isSingleOrShortPhrase =
-        wordCount <= 4 && selectedText.length <= 40;
-
-      const box = createHTML(doc, "div", {
-        display: "flex",
-        flexDirection: "column",
-        gap: "6px",
-        padding: "8px 12px",
-        borderTop: "1px solid rgba(128,128,128,0.25)",
-        marginTop: "4px",
-        fontSize: "12px",
-        maxWidth: "300px",
-      });
-
-      if (isSingleOrShortPhrase) {
-        const headerRow = createHTML(doc, "div", {
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-        });
-
-        const titleSpan = createHTML(doc, "strong", {
-          color: "#d9534f",
-          cursor: "pointer",
-        });
-        titleSpan.textContent = `${selectedText} 🔊`;
-        titleSpan.addEventListener("click", () =>
-          playAudio(doc, selectedText)
-        );
-
-        const pageTag = createHTML(doc, "span", {
-          fontSize: "10px",
-          color: "#888",
-        });
-        pageTag.textContent = `P.${pageIndex + 1}`;
-
-        headerRow.appendChild(titleSpan);
-        headerRow.appendChild(pageTag);
-        box.appendChild(headerRow);
-
-        const defText = createHTML(doc, "div", {
-          color: "#444",
-          fontSize: "11px",
-          lineHeight: "1.35",
-        });
-        defText.textContent = "🔍 百度翻译与词典查询中...";
-        box.appendChild(defText);
-
-        const ctxInput = createHTML(
-          doc,
-          "input",
-          {
-            padding: "3px 6px",
-            borderRadius: "4px",
-            border: "1px solid #ccc",
-            fontSize: "11px",
-          },
-          { type: "text", placeholder: "可选：添加原句例句或笔记..." }
-        );
-        box.appendChild(ctxInput);
-
-        const saveBtn = createHTML(doc, "button", {
-          padding: "4px 8px",
-          cursor: "pointer",
-          borderRadius: "4px",
-          border: "none",
-          backgroundColor: "#28a745",
-          color: "#fff",
-          fontWeight: "bold",
-          fontSize: "11px",
-        });
-        saveBtn.textContent = "➕ 加入生词本";
-        box.appendChild(saveBtn);
-        append(box);
-
-        const infoPromise = fetchWordRichInfo(selectedText);
-        if (extractWords(selectedText).length > 1) {
-          appendWordPicker(doc, box, selectedText, () => ({
-            contextSentence: ctxInput.value.trim() || selectedText,
-            sourceTitle: paperTitle, itemID: parentID, attachmentID, pageIndex,
-          }), infoPromise);
-        }
-        saveBtn.addEventListener("click", async () => {
-          if (saveBtn.disabled) return;
-          saveBtn.disabled = true;
-          try {
-            const info = await infoPromise;
-            addOrUpdateWord({
-              word: selectedText,
-              phonetic: info.phonetic,
-              meaning: info.combinedMeaning,
-              contextSentence: ctxInput.value.trim(),
-              sourceTitle: paperTitle,
-              itemID: parentID,
-              attachmentID,
-              pageIndex,
-            });
-            saveBtn.textContent = "✅ 已收入生词本 (含页码定位)";
-            saveBtn.style.backgroundColor = "#6c757d";
-          } catch (error) {
-            saveBtn.disabled = false;
-            saveBtn.textContent = "收录失败，请检查生词数据后重试";
-          }
-        });
-        const info = await infoPromise;
-        if (info.phonetic) titleSpan.textContent = `${selectedText} ${info.phonetic} 🔊`;
-        defText.textContent = info.combinedMeaning;
+async function renderSelectionPopup(event) {
+  if (!isPreferenceEnabled(PREF_POPUP)) return;
+  const { reader, doc, params, append } = event;
+  const selectedText = (params?.annotation?.text || "").replace(/\s+/g, " ").trim();
+  if (!selectedText) return;
+  const automatic = isPreferenceEnabled(PREF_AUTO_TRANSLATE);
+  const position = params?.annotation?.position ? JSON.parse(JSON.stringify(params.annotation.position)) : null;
+  const attachmentID = reader.itemID || null;
+  const pageIndex = position?.pageIndex ?? 0;
+  let paperTitle = "PDF 文献", parentID = null;
+  try {
+    const attachment = Zotero.Items.get(attachmentID);
+    const item = attachment?.parentItemID ? Zotero.Items.get(attachment.parentItemID) : attachment;
+    if (item) { parentID = item.id; paperTitle = item.getField("title") || paperTitle; }
+  } catch (error) {}
+  const short = selectedText.split(/\s+/).length <= 4 && selectedText.length <= 40;
+  const box = createHTML(doc, "div", {
+    display: "flex", flexDirection: "column", gap: "7px", padding: "8px 12px",
+    borderTop: "1px solid rgba(128,128,128,0.25)", marginTop: "4px", fontSize: "12px",
+    width: "320px", maxWidth: "calc(100vw - 40px)", maxHeight: "min(60vh, 440px)",
+    overflowY: "auto", overflowX: "hidden", overscrollBehavior: "contain",
+    color: "CanvasText", backgroundColor: "Canvas",
+  }, { "data-vocab-selection-popup": "true" });
+  const title = createHTML(doc, "strong");
+  title.textContent = short ? `${selectedText} · P.${pageIndex + 1}` : `句子翻译与多词收录 · P.${pageIndex + 1}`;
+  const output = createHTML(doc, "div", { whiteSpace: "pre-wrap", fontSize: "12px" }, { role: "status", "aria-live": "polite" });
+  output.textContent = automatic ? "正在查询翻译…" : "自动翻译已关闭，可直接收录或点击翻译。";
+  const translate = createHTML(doc, "button", { padding: "4px 8px" });
+  translate.textContent = "翻译选区";
+  box.append(title);
+  if (short) {
+    const speak = createHTML(doc, "button", { alignSelf: "flex-start", padding: "2px 7px" });
+    speak.textContent = "🔊 发音";
+    speak.addEventListener("click", () => playAudio(doc, selectedText));
+    box.append(speak);
+  }
+  box.append(output, translate);
+  let richInfo = { phonetic: "", combinedMeaning: "" };
+  let translated = "";
+  let pending = Promise.resolve();
+  const query = async () => {
+    translate.disabled = true;
+    output.textContent = "正在查询翻译…";
+    try {
+      // Keep the collector available for arbitrarily long selections. Large passages
+      // translate only an explicitly labelled UTF-8 prefix within Baidu's query limit.
+      let queryText = selectedText;
+      while (new TextEncoder().encode(queryText).length > 5500) queryText = queryText.slice(0, -100);
+      if (short) {
+        richInfo = await fetchWordRichInfo(queryText);
+        output.textContent = richInfo.combinedMeaning;
+        if (richInfo.phonetic) title.textContent = `${selectedText} ${richInfo.phonetic} · P.${pageIndex + 1}`;
       } else {
-        const titleRow = createHTML(doc, "div", {
-          fontSize: "11px",
-          fontWeight: "bold",
-          color: "#0066cc",
-        });
-        titleRow.textContent = `🌐 百度学术长句翻译 (P.${pageIndex + 1})`;
-        box.appendChild(titleRow);
-
-        const transBox = createHTML(doc, "div", {
-          fontSize: "11px",
-          lineHeight: "1.4",
-          color: "#333",
-          maxHeight: "110px",
-          overflowY: "auto",
-          padding: "4px",
-          backgroundColor: "rgba(0,102,204,0.06)",
-          borderRadius: "4px",
-        });
-        transBox.textContent = "⏳ 正在请求百度翻译 API...";
-        box.appendChild(transBox);
-
-        let baiduRes = { ok: false, text: "" };
-        const translation = translateWithBaidu(selectedText).then(result => { baiduRes = result; });
-        appendWordPicker(doc, box, selectedText, () => ({
-          contextSentence: selectedText, contextTrans: baiduRes.ok ? baiduRes.text : "",
-          sourceTitle: paperTitle, itemID: parentID, attachmentID, pageIndex,
-        }), translation);
-        append(box);
-        await translation;
-        transBox.textContent = baiduRes.text;
+        const result = await translateWithBaidu(queryText);
+        translated = result.ok ? result.text : "";
+        if (translated && queryText.length < selectedText.length) translated = "（长选区，仅翻译开头部分）" + translated;
+        output.textContent = result.ok ? translated : result.text;
       }
-    },
-    PLUGIN_ID
-  );
+    } catch (error) {
+      output.textContent = "翻译失败，可重试或先保存生词。";
+    } finally { translate.disabled = false; }
+  };
+  translate.addEventListener("click", () => { if (!translate.disabled) pending = query(); });
+  if (automatic) pending = query();
+  const getContext = () => ({
+    contextSentence: short ? "" : selectedText, contextTrans: translated,
+    sourceTitle: paperTitle, itemID: parentID, attachmentID, pageIndex, position,
+  });
+  if (short) {
+    const contextInput = createHTML(doc, "input", { padding: "4px 6px" }, { type: "text", placeholder: "可选：原句例句或笔记" });
+    const save = createHTML(doc, "button", { padding: "5px 8px", backgroundColor: "#247a3c", color: "white" });
+    save.textContent = "➕ 加入生词本";
+    save.addEventListener("click", async () => {
+      if (save.disabled) return;
+      save.disabled = true;
+      try {
+        await pending;
+        addOrUpdateWord({ ...getContext(), position: await resolveWordPosition(reader, selectedText, position), contextSentence: contextInput.value.trim(), word: selectedText,
+          phonetic: richInfo.phonetic, meaning: richInfo.combinedMeaning });
+        save.textContent = "已收入生词本";
+      } catch (error) {
+        save.disabled = false;
+        save.textContent = "收录失败，请重试";
+      }
+    });
+    box.append(contextInput, save);
+  }
+  if (!short || extractWords(selectedText).length > 1) {
+    appendWordPicker(doc, box, selectedText, () => ({ ...getContext(), contextSentence: selectedText }),
+      () => pending, {
+        lookup: automatic ? fetchWordRichInfo : async () => ({ ok: true, phonetic: "", combinedMeaning: "" }),
+        delay: automatic ? undefined : async () => {},
+        getPosition: word => resolveWordPosition(reader, word, position, selectedText),
+      });
+  }
+  append(box);
 }
 
 function onMainWindowLoad({ window }) {
   if (window.MozXULElement) {
     window.MozXULElement.insertFTLIfNeeded("vocab-book-ui.ftl");
   }
+  readingDashboard?.install(window, { getVocabList, getWordsForPaper, openWordLocation });
 }
 
 function onMainWindowUnload({ window }) {
+  readingDashboard?.uninstall(window);
   window.document.querySelector('[href="vocab-book-ui.ftl"]')?.remove();
 }
 
 function shutdown() {
+  readingDashboard?.shutdown();
+  readingDashboard = null;
   if (registeredSectionID) {
     Zotero.ItemPaneManager.unregisterSection(registeredSectionID);
     registeredSectionID = null;
@@ -1412,5 +1531,6 @@ function shutdown() {
     registeredPreferencesID = null;
   }
   delete Zotero.VocabBook;
+  for (const state of activeSidebarContainers) state.resizeObserver?.disconnect();
   activeSidebarContainers.clear();
 }

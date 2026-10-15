@@ -23,6 +23,7 @@ XPI_PATH = os.path.join(SRC_DIR, "zotero-vocab-book.xpi")
 TEXT_FILES = [
     "manifest.json",
     "bootstrap.js",
+    "reading-dashboard.js",
     "preferences.xhtml",
     "preferences.js",
     "preferences.css",
