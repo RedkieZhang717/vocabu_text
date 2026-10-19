@@ -9,3 +9,5 @@
 #vocab-book-settings button { padding: 6px 12px; }
 #vocab-book-settings .vocab-check { display: flex; align-items: center; gap: 8px; margin: 8px 0; line-height: 1.5; }
 #vocab-book-settings #vocab-status { min-height: 1.6em; overflow-wrap: anywhere; }
+#vocab-book-settings ol { margin: 8px 0; padding-inline-start: 22px; line-height: 1.7; }
+#vocab-book-settings li { margin-bottom: 7px; }

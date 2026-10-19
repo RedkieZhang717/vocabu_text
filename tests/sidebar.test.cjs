@@ -61,10 +61,12 @@ for (const locale of ['zh-CN', 'en-US']) {
   });
 }
 
-test('empty library still exposes search, add, review, settings and help', () => {
+test('empty library exposes study controls without sidebar settings or help', () => {
   const { state } = harness();
-  for (const label of ['查词入库', '闪卡背词', '导出 Anki', '⚙️', '❓']) assert.ok(button(state.body, label));
+  for (const label of ['查词入库', '闪卡背词', '导出 Anki']) assert.ok(button(state.body, label));
   assert.match(state.body.textContent, /还没有生词/);
+  assert.equal(button(state.body, '⚙️'), undefined);
+  assert.equal(button(state.body, '❓'), undefined);
 });
 
 test('filtering a reviewed card out does not skip its successor', () => {
@@ -269,25 +271,34 @@ test('source navigation highlights the precise word instead of only opening its 
   assert.equal(target.position.rects[0][0], 30);
 });
 
-test('automatic translation can be disabled without disabling long-selection collection', async () => {
+test('auto-translation off makes no selection request, but explicit collection saves a meaning', async () => {
   const { context, prefs, dom } = harness();
   prefs.set('extensions.vocabbook.autoTranslate', false);
   let requests = 0;
-  context.Zotero.HTTP.request = async () => { requests++; throw new Error('must not query'); };
+  context.Zotero.HTTP.request = async () => { requests++; return {response:{ec:{word:[{trs:[{tr:[{l:{i:['证据']}}]}]}]}}}; };
   const text = 'alpha beta gamma delta evidence '.repeat(50);
   let popup;
   await context.renderSelectionPopup({ reader: { itemID: 30 }, doc: dom.window.document,
-    params: { annotation: { text, position: { pageIndex: 3, rects: [[1, 2, 3, 4]] } } }, append: node => { popup = node; } });
-  assert.ok(text.length > 800);
-  assert.equal(popup.style.overflowY, 'auto');
-  assert.match(popup.style.maxHeight, /60vh/);
-  button(popup, 'evidence').click();
-  button(popup, '加入 1').click();
-  await new Promise(resolve => setImmediate(resolve));
+    params: { annotation: { text, position: { pageIndex: 3, rects: [[1, 2, 3, 4]] } } }, append: node => { popup = node; } }, {delay:async()=>{}});
   assert.equal(requests, 0);
-  assert.equal(context.getVocabList()[0].word, 'evidence');
+  const dropdown = popup.querySelector('[aria-controls]');
+  const panel = popup.querySelector('#'+dropdown.getAttribute('aria-controls'));
+  assert.equal(panel.hidden, true);
+  assert.equal(popup.querySelector('[aria-label="翻译选区"]').textContent, '');
+  dropdown.click();
+  assert.equal(panel.hidden, false);
+  assert.equal(panel.style.overflowY, 'auto');
+  assert.match(popup.style.maxHeight, /60vh/);
+  const picker = popup.querySelector('[data-vocab-word-picker]');
+  button(picker, 'evidence').click();
+  button(picker, '加入 1').click();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(requests, 1);
+  assert.equal(context.getVocabList()[0].meaning, '证据');
   assert.equal(context.getVocabList()[0].contextSentence, text.trim());
   assert.equal(context.getVocabList()[0].pageIndex, 3);
+  dropdown.click();
+  assert.equal(panel.hidden, true);
 });
 
 test('flashcard selected and answer buttons keep explicit contrasting theme colors', () => {
@@ -310,7 +321,8 @@ test('short selection still offers pronunciation while automatic translation is 
   let popup;
   await context.renderSelectionPopup({ reader: {}, doc: dom.window.document,
     params: { annotation: { text: 'evidence' } }, append: value => { popup = value; } });
-  button(popup, '发音').click();
+  popup.querySelector('[aria-controls]').click();
+  popup.querySelector('[aria-label="播放发音"]').click();
   assert.equal(spoken, 'evidence');
 });
 
@@ -320,4 +332,112 @@ test('word position on the next selected page also updates the displayed page nu
     position: { pageIndex: 4, rects: [[1, 2, 3, 4]] } });
   assert.equal(context.getVocabList()[0].pageIndex, 4);
   assert.equal(context.getWordsForPaper(context.getVocabList(), 9)[0].pageIndex, 4);
+});
+
+
+async function popupFor(h, text, options = {}, reader = {}) {
+  let popup;
+  await h.context.renderSelectionPopup({ reader, doc: h.dom.window.document,
+    params: { annotation: { text, position: { pageIndex: 0, rects: [[0, 0, 1000, 30]] } } }, append: node => { popup = node; } },
+    { delay: async () => {}, ...options });
+  return popup;
+}
+const tick = () => new Promise(resolve => setImmediate(resolve));
+
+test('collecting a single word with auto-translation off queries on save, including an empty legacy meaning', async () => {
+  const h = harness([{word:'evidence',meaning:''}]);
+  h.prefs.set('extensions.vocabbook.autoTranslate',false);
+  let queried=0;
+  const popup=await popupFor(h,'evidence',{lookup:async()=>{queried++;return {ok:true,combinedMeaning:'证据'};}});
+  assert.equal(queried,0);
+  popup.querySelector('[aria-controls]').click();
+  const picker=popup.querySelector('[data-vocab-word-picker]');
+  button(picker,'加入 1').click(); await tick();
+  assert.equal(queried,1);
+  assert.equal(h.context.getVocabList()[0].meaning,'证据');
+  assert.equal(h.context.getVocabList()[0].meaningPending,false);
+  assert.match(h.state.body.textContent,/证据/);
+});
+
+test('manual translation results are reused when collecting instead of being discarded', async () => {
+  const h=harness();h.prefs.set('extensions.vocabbook.autoTranslate',false);
+  let queried=0;
+  const popup=await popupFor(h,'evidence',{lookup:async()=>{queried++;return {ok:true,combinedMeaning:'证据'};}});
+  popup.querySelector('[aria-label="翻译选区"]').click(); await tick();
+  popup.querySelector('[aria-controls]').click();
+  button(popup.querySelector('[data-vocab-word-picker]'),'加入 1').click();await tick();
+  assert.equal(queried,1);
+  assert.equal(h.context.getVocabList()[0].meaning,'证据');
+});
+
+test('a phrase is formed by contiguous token positions and saved as one entry with precise geometry', async () => {
+  const h=harness();h.prefs.set('extensions.vocabbook.autoTranslate',false);
+  const text='we learn in terms of evidence in practice';
+  const chars=[...text].map((u,i)=>({u,rect:[i*5,10,i*5+5,20]}));
+  const reader={itemID:30,_internalReader:{_primaryView:{_pdfPages:[{chars}],_ensureBasicPageData:async()=>{}}}};
+  let query;
+  const popup=await popupFor(h,text,{lookup:async word=>{query=word;return {ok:true,combinedMeaning:'就……而言'};}},reader);
+  popup.querySelector('[aria-controls]').click();button(popup,'词组').click();
+  const phrase=popup.querySelector('[data-vocab-phrase-picker]');
+  phrase.querySelector('[data-phrase-index="2"]').click();
+  phrase.querySelector('[data-phrase-index="4"]').click();
+  assert.equal(phrase.querySelector('[aria-label="要收录的词组"]').value,'in terms of');
+  button(phrase,'收录词组').click();await tick();
+  const entry=h.context.getVocabList()[0];
+  assert.equal(query,'in terms of');assert.equal(entry.word,'in terms of');
+  assert.equal(entry.meaning,'就……而言');assert.equal(entry.contextSentence,text);
+  assert.equal(entry.position.rects[0][0],text.indexOf('in terms of')*5);
+  assert.equal(h.context.getVocabList().length,1);
+});
+
+test('phrase range handles repeated words, reverse endpoints and editable manual meanings without requests', async () => {
+  const h=harness();h.prefs.set('extensions.vocabbook.autoTranslate',false);
+  const popup=await popupFor(h,'in theory and in terms of data',{lookup:async()=>{throw new Error('must not query');}});
+  popup.querySelector('[aria-controls]').click();button(popup,'词组').click();
+  const phrase=popup.querySelector('[data-vocab-phrase-picker]');
+  phrase.querySelector('[data-phrase-index="5"]').click();
+  phrase.querySelector('[data-phrase-index="3"]').click();
+  const input=phrase.querySelector('[aria-label="要收录的词组"]');
+  assert.equal(input.value,'in terms of');
+  input.value='in terms of data';input.dispatchEvent(new h.dom.window.Event('input'));
+  assert.equal(phrase.querySelectorAll('[aria-pressed="true"]').length,0);
+  phrase.querySelector('[aria-label="词组手动释义"]').value='从数据角度';
+  button(phrase,'收录词组').click();await tick();
+  const entry=h.context.getVocabList()[0];
+  assert.equal(entry.word,'in terms of data');assert.equal(entry.meaning,'从数据角度');
+  assert.equal(entry.meaningEdited,true);
+});
+
+test('failed lookups save an explicit pending meaning and support repairing the old entry', async () => {
+  const h=harness();h.prefs.set('extensions.vocabbook.autoTranslate',false);
+  const popup=await popupFor(h,'evidence',{lookup:async()=>{throw new Error('offline');}});
+  popup.querySelector('[aria-controls]').click();
+  const picker=popup.querySelector('[data-vocab-word-picker]');
+  button(picker,'加入 1').click();await tick();
+  let entry=h.context.getVocabList()[0];
+  assert.equal(entry.meaning,'待补充释义');assert.equal(entry.meaningPending,true);
+  assert.match(picker.textContent,/待补充释义/);
+  h.context.fetchWordRichInfo=async()=>({ok:true,combinedMeaning:'依据',phonetic:'/test/'});
+  button(h.state.body,'补查释义').click();await tick();
+  entry=h.context.getVocabList()[0];
+  assert.equal(entry.meaning,'依据');assert.equal(entry.meaningPending,false);
+  assert.equal(entry.contextSentence,'evidence');
+  assert.equal(button(h.state.body,'补查释义'),undefined);
+});
+
+test('late meaning repair cannot replace a manual correction made while the lookup is running', async () => {
+  const h=harness([{word:'evidence',meaning:''}]);
+  let release;
+  h.context.fetchWordRichInfo=()=>new Promise(resolve=>{release=resolve;});
+  button(h.state.body,'补查释义').click();
+  h.context.updateWordMeaning('evidence','人工纠正');
+  release({ok:true,combinedMeaning:'机器释义'});await tick();
+  assert.equal(h.context.getVocabList()[0].meaning,'人工纠正');
+});
+
+test('a successful stored definition is retained if an empty lookup is saved later', () => {
+  const h=harness([{word:'evidence',meaning:'证据'}]);
+  h.context.addOrUpdateWord({word:'evidence',meaning:'暂无释义',itemID:9});
+  assert.equal(h.context.getVocabList()[0].meaning,'证据');
+  assert.equal(h.context.getVocabList()[0].meaningPending,false);
 });

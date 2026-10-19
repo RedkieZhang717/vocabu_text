@@ -167,7 +167,7 @@ async function translateWithBaidu(queryText) {
 
   const { appid, secret } = getBaiduCredentials();
   if (!appid || !secret) {
-    return { ok: false, text: "未配置百度 API 密钥 (格式: APPID#密钥)" };
+    return { ok: false, text: "请在 Zotero 设置 → 多功能单词本中填写百度 APP ID 和密钥" };
   }
 
   const salt = Date.now().toString();
@@ -262,19 +262,30 @@ function extractWords(text) {
   });
 }
 
+function hasWordMeaning(meaning) {
+  return typeof meaning === "string" && meaning.trim() !== ""
+    && !["暂无释义", "待补充释义"].includes(meaning.trim());
+}
+
 async function collectWords(words, context, { lookup = fetchWordRichInfo,
   delay = () => new Promise(resolve => setTimeout(resolve, 1100)), onProgress = () => {},
-  getPosition = async () => context.position || null } = {}) {
-  const result = { saved: [], failed: [] };
+  getPosition = async () => context.position || null, allowUntranslated = false } = {}) {
+  const result = { saved: [], failed: [], missing: [] };
   const unique = [...new Map(words.map(word => [word.trim().toLowerCase(), word.trim()])).values()].filter(Boolean);
   for (const word of unique) {
     // Allow standard Baidu accounts (one request per second) to collect a batch.
     await delay();
     try {
-      const info = await lookup(word);
-      if (!info.ok) throw new Error("释义查询失败，请检查网络或翻译配置");
+      let info;
+      try { info = await lookup(word); }
+      catch (error) { if (!allowUntranslated) throw error; }
+      if (!info?.ok || !hasWordMeaning(info.combinedMeaning)) {
+        if (!allowUntranslated) throw new Error("释义查询失败，请检查网络或翻译配置");
+        info = { phonetic: "", combinedMeaning: "" };
+      }
       addOrUpdateWord({ ...context, word, phonetic: info.phonetic, meaning: info.combinedMeaning, position: await getPosition(word) });
       result.saved.push(word);
+      if (!hasWordMeaning(getVocabList().find(entry => entry.word.toLowerCase() === word.toLowerCase())?.meaning)) result.missing.push(word);
     } catch (error) {
       result.failed.push(word);
     }
@@ -283,14 +294,15 @@ async function collectWords(words, context, { lookup = fetchWordRichInfo,
   return result;
 }
 
-function appendWordPicker(doc, box, text, getContext, ready = Promise.resolve(), { lookup = fetchWordRichInfo, getPosition, delay } = {}) {
+function appendWordPicker(doc, box, text, getContext, ready = Promise.resolve(), { lookup = fetchWordRichInfo, getPosition, delay, allowUntranslated = false } = {}) {
   const picker = createHTML(doc, "div", { display: "flex", flexDirection: "column", gap: "6px" });
   picker.dataset.vocabWordPicker = "true";
   const label = createHTML(doc, "div");
-  label.textContent = "点选多个生词，分别保存并保留原句：";
+  label.textContent = "点选要记住的词，点击收录时查询释义：";
   picker.appendChild(label);
   const chips = createHTML(doc, "div", { display: "flex", flexWrap: "wrap", gap: "4px", maxHeight: "140px", overflowY: "auto" });
-  const selected = new Set();
+  const words = extractWords(text);
+  const selected = new Set(words.length === 1 ? words : []);
   const buttons = new Map();
   const status = createHTML(doc, "div", { fontSize: "11px" }, { role: "status", "aria-live": "polite" });
   const save = createHTML(doc, "button", { padding: "5px 8px", backgroundColor: "#247a3c", color: "white", border: "none", borderRadius: "4px" });
@@ -303,7 +315,7 @@ function appendWordPicker(doc, box, text, getContext, ready = Promise.resolve(),
     save.disabled = selected.size === 0;
     save.textContent = `加入 ${selected.size} 个生词（保留原句）`;
   };
-  for (const word of extractWords(text)) {
+  for (const word of words) {
     const chip = createHTML(doc, "button", { padding: "2px 6px", border: "1px solid #aaa", borderRadius: "4px" }, { "aria-pressed": "false" });
     chip.textContent = word;
     chip.addEventListener("click", () => { selected.has(word) ? selected.delete(word) : selected.add(word); update(); });
@@ -318,11 +330,12 @@ function appendWordPicker(doc, box, text, getContext, ready = Promise.resolve(),
     try {
       await (typeof ready === "function" ? ready() : ready);
       const result = await collectWords([...selected], getContext(), {
-        lookup, getPosition, delay,
+        lookup, getPosition, delay, allowUntranslated,
         onProgress: (done, total) => { status.textContent = `正在入库 ${done}/${total}…`; },
       });
       for (const word of result.saved) selected.delete(word);
-      status.textContent = `已保存 ${result.saved.length} 个生词。` + (result.failed.length ? `未保存：${result.failed.join('、')}。可重试。` : "");
+      status.textContent = `已保存 ${result.saved.length} 个生词。` + (result.missing?.length ? `待补充释义：${result.missing.join('、')}，可在单词本补查或手动修改。` : "")
+        + (result.failed.length ? `未保存：${result.failed.join('、')}。可重试。` : "");
     } catch (error) {
       status.textContent = "收录失败，请重试。";
     } finally {
@@ -379,10 +392,35 @@ function updateWordMeaning(word, meaning) {
   if (!String(meaning).trim()) throw new Error("请填写释义");
   entry.meaning = String(meaning).trim();
   entry.meaningEdited = true;
+  entry.meaningPending = false;
   saveVocabList(list);
 }
 
 function appendMeaningEditor(doc, container, entry) {
+  if (!hasWordMeaning(entry.meaning)) {
+    const lookup = createHTML(doc, "button", { alignSelf: "flex-start", fontSize: "11px", padding: "2px 7px" });
+    lookup.textContent = "补查释义";
+    lookup.addEventListener("click", async () => {
+      lookup.disabled = true;
+      lookup.textContent = "正在查词…";
+      try {
+        const info = await fetchWordRichInfo(entry.word);
+        if (!info.ok || !hasWordMeaning(info.combinedMeaning)) throw new Error("暂未查到释义，请检查设置或手动修改");
+        const list = getVocabList();
+        const current = list.find(value => value.word.toLowerCase() === entry.word.toLowerCase());
+        if (!current) throw new Error("该词已删除");
+        // A lookup finishing later must not replace a correction made in the meantime.
+        if (!current.meaningEdited) {
+          current.meaning = info.combinedMeaning;
+          current.phonetic = info.phonetic || current.phonetic || "";
+          current.meaningPending = false;
+          saveVocabList(list);
+        }
+      } catch (error) { lookup.textContent = "未查到释义，点击重试"; lookup.title = String(error.message || error); }
+      finally { lookup.disabled = false; }
+    });
+    container.appendChild(lookup);
+  }
   const edit = createHTML(doc, "button", { alignSelf: "flex-start", fontSize: "11px", padding: "2px 7px" });
   edit.textContent = "✎ 修改释义";
   edit.addEventListener("click", () => {
@@ -432,6 +470,8 @@ function addOrUpdateWord({
     (w) => w.word.toLowerCase() === cleanWord.toLowerCase()
   );
   const old = idx >= 0 ? list[idx] : null;
+  const nextMeaning = old?.meaningEdited ? old.meaning : hasWordMeaning(meaning) ? meaning
+    : hasWordMeaning(old?.meaning) ? old.meaning : "待补充释义";
   const locations = old ? getWordLocations(old).map(location => ({ ...location })) : [];
   if (itemID || attachmentID) {
     const location = { itemID, attachmentID, pageIndex, position, contextSentence, contextTrans, source: sourceTitle };
@@ -445,7 +485,8 @@ function addOrUpdateWord({
     list[idx] = {
       ...old,
       phonetic: phonetic || old.phonetic || "",
-      meaning: old.meaningEdited ? old.meaning : meaning || old.meaning || "暂无释义",
+      meaning: nextMeaning,
+      meaningPending: !hasWordMeaning(nextMeaning),
       contextSentence: itemID || attachmentID ? contextSentence : contextSentence || old.contextSentence || "",
       contextTrans: itemID || attachmentID ? contextTrans : contextTrans || old.contextTrans || "",
       note: note || old.note || "",
@@ -462,7 +503,8 @@ function addOrUpdateWord({
     list.unshift({
       word: cleanWord,
       phonetic: phonetic || "",
-      meaning: meaning || "暂无释义",
+      meaning: nextMeaning,
+      meaningPending: !hasWordMeaning(nextMeaning),
       contextSentence: contextSentence || "",
       contextTrans: contextTrans || "",
       note: note || "",
@@ -748,63 +790,8 @@ function renderSidebarView(state) {
     }, 1500);
   });
 
-  const settingBtn = createHTML(doc, "button", btnStyle);
-  settingBtn.textContent = "⚙️";
-  settingBtn.title = "打开多功能单词本设置";
-  settingBtn.addEventListener("click", () => {
-    Zotero.Utilities.Internal.openPreferences(PREFERENCES_ID);
-  });
-
-  const helpBtn = createHTML(doc, "button", btnStyle);
-  helpBtn.textContent = "❓";
-  helpBtn.title = "使用说明 / 怎么复习";
-  helpBtn.addEventListener("click", () => {
-    state.showHelp = !state.showHelp;
-    renderSidebarContent(state);
-  });
-
-  navBar.appendChild(scopeBtn);
-  navBar.appendChild(modeBtn);
-  navBar.appendChild(exportBtn);
-  navBar.appendChild(settingBtn);
-  navBar.appendChild(helpBtn);
+  navBar.append(scopeBtn, modeBtn, exportBtn);
   wrapper.appendChild(navBar);
-
-  if (state.showHelp) {
-    const helpBox = createHTML(doc, "div", {
-      padding: "8px 9px",
-      borderRadius: "6px",
-      border: "1px dashed #28a745",
-      backgroundColor: "rgba(40,167,69,0.06)",
-      fontSize: "11px",
-      lineHeight: "1.6",
-      whiteSpace: "pre-line",
-    });
-    helpBox.textContent = [
-      "📖 收录生词（划词）",
-      "1. 在主窗口双击文献的 PDF，用鼠标划选单词或整句",
-      "2. 在浮窗里点「➕ 加入生词本」（可先填例句）",
-      "3. 整句可点选多个词分别入库；自动翻译可在设置中关闭",
-      "",
-      "🎴 复习（闪卡背词）",
-      "1. 在主窗口选中文献，右侧栏「多功能单词本」里点「🎴 闪卡背词」",
-      "2. 看单词和例句先回忆，点「👀 点击显示释义与译文」翻面",
-      "3. 按 🔴生疏 / 🟡模糊 / 🟢掌握 打分，自动跳下一个",
-      "4. 用等级按钮只刷某一档，例如「🔴 仅生疏」反复巩固",
-      "",
-      "📚 阅读管理",
-      "· 主窗口工具栏书本图标打开文献卡片，可标记已读、展开生词和保存笔记",
-      "· 笔记保存在本机，关闭窗口前请保存；详细教程可在设置页打开",
-      "",
-      "💡 其他",
-      "· 顶部输入框可手动查词入库（不用打开 PDF）",
-      "· 「📚 全部生词/📖 当前文献」切换范围，「🔍」搜索，「🕒最新/🔥生疏优先/🔤A-Z」排序",
-      "· 「📤 导出 Anki」按当前文献/全部生词范围复制 TSV，保存为 UTF-8 文本后导入 Anki",
-      "· 卡片上的 🔴🟡🟢 徽章点一下改熟练度，「✖」删除",
-      "· 「定位原词」回到 PDF 并尝试高亮；无字符位置时可能只到选区或页码",
-    ].join("\n");
-    wrapper.appendChild(helpBox);
-  }
 
   const allWords = getVocabList();
   const scopedWords = state.onlyCurrentPaper
@@ -941,7 +928,7 @@ function renderSidebarView(state) {
           fontWeight: "bold",
           marginBottom: "4px",
         });
-        meanEl.textContent = cur.meaning;
+        meanEl.textContent = hasWordMeaning(cur.meaning) ? cur.meaning : "待补充释义";
         ansBox.appendChild(meanEl);
         appendMeaningEditor(doc, ansBox, cur);
 
@@ -1156,16 +1143,7 @@ function renderSidebarView(state) {
     });
     emptyTip.textContent = allWords.length
       ? "当前范围或筛选条件下没有生词。\n可清空搜索、切换等级，或点「当前文献」切换到全部生词。"
-      : [
-          "📖 还没有生词，四步开始：",
-          "1️⃣ 在主窗口双击文献的 PDF 打开阅读器",
-          "2️⃣ 用鼠标划选单词（≤4 词）或整句",
-          "3️⃣ 在浮窗里点「➕ 加入生词本」",
-          "4️⃣ 回主窗口选中该文献 → 右侧栏「多功能单词本」",
-          "",
-          "🎴 复习：点上面的「🎴 闪卡背词」，翻面后按 🔴🟡🟢 打分",
-          "❓ 详细说明点右上角「❓」；本框也可直接输入单词回车入库",
-        ].join("\n");
+      : "还没有生词，可在 PDF 划选收录，或在上方输入单词查询。";
     listContainer.appendChild(emptyTip);
   } else {
     for (const itemObj of filtered) {
@@ -1257,7 +1235,7 @@ function renderSidebarView(state) {
         fontSize: "12px",
         lineHeight: "1.4",
       });
-      meanText.textContent = itemObj.meaning;
+      meanText.textContent = hasWordMeaning(itemObj.meaning) ? itemObj.meaning : "待补充释义";
       card.appendChild(meanText);
       appendMeaningEditor(doc, card, itemObj);
 
@@ -1399,7 +1377,6 @@ async function startup({ id, version, rootURI }) {
           masteryFilter: -1,
           sortBy: "date",
           searchQuery: "",
-          showHelp: false,
           flashcardIndex: 0,
           flashcardFlipped: false,
         };
@@ -1415,7 +1392,94 @@ async function startup({ id, version, rootURI }) {
   Zotero.Reader.registerEventListener("renderTextSelectionPopup", renderSelectionPopup, PLUGIN_ID);
 }
 
-async function renderSelectionPopup(event) {
+function selectionIcon(doc, name) {
+  const svg = doc.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 20 20");
+  svg.setAttribute("width", "16"); svg.setAttribute("height", "16");
+  svg.setAttribute("aria-hidden", "true"); svg.setAttribute("focusable", "false");
+  svg.style.display = "block";
+  const paths = {
+    translate: "M2 4h9M6 2v2m3 0c-1 5-3 7-7 9m1-7c1 3 3 5 6 6m2 5 3-9 4 9m-6-3h5",
+    collect: "M3 3h10v14H3zM6 6h4M6 9h3m6-2v6m-3-3h6",
+    chevron: "m6 8 4 4 4-4",
+    audio: "M3 8v4h3l4 3V5L6 8H3m10-1c2 2 2 4 0 6m2-8c3 3 3 7 0 10",
+  };
+  const path = doc.createElementNS(svg.namespaceURI, "path");
+  path.setAttribute("d", paths[name]); path.setAttribute("fill", "none");
+  path.setAttribute("stroke", "currentColor"); path.setAttribute("stroke-width", "1.5");
+  path.setAttribute("stroke-linecap", "round"); path.setAttribute("stroke-linejoin", "round");
+  svg.appendChild(path);
+  return svg;
+}
+
+function appendPhrasePicker(doc, box, text, getContext, { lookup, getPosition, ready = () => Promise.resolve() }) {
+  const picker = createHTML(doc, "div", { display: "flex", flexDirection: "column", gap: "7px" }, { "data-vocab-phrase-picker": "true" });
+  const hint = createHTML(doc, "div", { fontSize: "11px" });
+  hint.textContent = "先点起词，再点结尾，连续词组自动合并；也可在下方编辑。";
+  const tokens = [...text.matchAll(/[A-Za-z]+(?:[-’'][A-Za-z]+)*/g)];
+  const row = createHTML(doc, "div", { display: "flex", flexWrap: "wrap", gap: "4px", maxHeight: "112px", overflowY: "auto", overscrollBehavior: "contain" });
+  const input = createHTML(doc, "input", { width: "100%", padding: "5px 7px", color: "FieldText", backgroundColor: "Field" }, { type: "text", placeholder: "例如：in terms of", "aria-label": "要收录的词组", maxlength: "240" });
+  input.value = tokens.length > 1 && tokens.length <= 6 && text.length <= 80 ? text : "";
+  const meaning = createHTML(doc, "input", { width: "100%", padding: "5px 7px", color: "FieldText", backgroundColor: "Field" }, { type: "text", placeholder: "可选：手填释义；留空时收录即查", "aria-label": "词组手动释义" });
+  const status = createHTML(doc, "div", { fontSize: "11px" }, { role: "status", "aria-live": "polite" });
+  const save = createHTML(doc, "button", { padding: "5px 8px", border: "none", borderRadius: "5px", color: "white", backgroundColor: "#285cba" });
+  save.textContent = "收录词组";
+  let start = null, range = null, busy = false;
+  const chips = [];
+  const repaint = () => {
+    chips.forEach((chip, index) => {
+      const selected = range && index >= range[0] && index <= range[1];
+      chip.setAttribute("aria-pressed", String(!!selected));
+      setButtonColors(chip, selected ? "#285cba" : "ButtonFace", selected ? "white" : "ButtonText");
+    });
+    save.disabled = busy || !input.value.trim();
+  };
+  tokens.forEach((token, index) => {
+    const chip = createHTML(doc, "button", { padding: "2px 6px", fontSize: "11px", minHeight: "25px", border: "1px solid rgba(128,128,128,.35)", borderRadius: "4px" }, { "aria-pressed": "false", "data-phrase-index": String(index) });
+    chip.textContent = token[0];
+    chip.addEventListener("click", () => {
+      if (busy) return;
+      if (start === null) {
+        start = index; range = [index, index]; input.value = token[0];
+        status.textContent = "已选起词，请再点词组的结尾。";
+      } else {
+        range = [Math.min(start, index), Math.max(start, index)];
+        input.value = text.slice(tokens[range[0]].index, tokens[range[1]].index + tokens[range[1]][0].length);
+        start = null; status.textContent = "词组已合并，可编辑后收录。";
+      }
+      repaint();
+    });
+    chips.push(chip); row.appendChild(chip);
+  });
+  input.addEventListener("input", () => { start = null; range = null; status.textContent = ""; repaint(); });
+  save.addEventListener("click", async () => {
+    if (save.disabled) return;
+    const phrase = input.value.trim().replace(/\s+/g, " ");
+    const manualMeaning = meaning.value.trim();
+    busy = true; input.disabled = true; meaning.disabled = true;
+    chips.forEach(chip => { chip.disabled = true; }); repaint();
+    status.textContent = manualMeaning ? "正在收录词组…" : "正在查询词组释义…";
+    try {
+      await ready();
+      let info;
+      try { info = manualMeaning ? { ok: true, combinedMeaning: manualMeaning } : await lookup(phrase); }
+      catch (_) { info = null; }
+      addOrUpdateWord({ ...getContext(), word: phrase, phonetic: info?.phonetic || "",
+        meaning: info?.ok ? info.combinedMeaning : "", position: await getPosition(phrase) });
+      if (manualMeaning) updateWordMeaning(phrase, manualMeaning);
+      const stored = getVocabList().find(entry => entry.word.toLowerCase() === phrase.toLowerCase());
+      status.textContent = hasWordMeaning(stored?.meaning) ? `已收录词组：${phrase}` : `已收录 ${phrase}，待补充释义；可在单词本补查或手动修改。`;
+    } catch (error) { status.textContent = "收录失败，请重试。"; }
+    finally {
+      busy = false; input.disabled = false; meaning.disabled = false;
+      chips.forEach(chip => { chip.disabled = false; }); repaint();
+    }
+  });
+  picker.append(hint, row, input, meaning, save, status); box.appendChild(picker); repaint();
+}
+
+var selectionPopupSequence = 0;
+async function renderSelectionPopup(event, { lookup = fetchWordRichInfo, delay } = {}) {
   if (!isPreferenceEnabled(PREF_POPUP)) return;
   const { reader, doc, params, append } = event;
   const selectedText = (params?.annotation?.text || "").replace(/\s+/g, " ").trim();
@@ -1432,85 +1496,125 @@ async function renderSelectionPopup(event) {
   } catch (error) {}
   const short = selectedText.split(/\s+/).length <= 4 && selectedText.length <= 40;
   const box = createHTML(doc, "div", {
-    display: "flex", flexDirection: "column", gap: "7px", padding: "8px 12px",
-    borderTop: "1px solid rgba(128,128,128,0.25)", marginTop: "4px", fontSize: "12px",
-    width: "320px", maxWidth: "calc(100vw - 40px)", maxHeight: "min(60vh, 440px)",
+    display: "flex", flexDirection: "column", gap: "5px", padding: "4px 6px",
+    borderTop: "1px solid rgba(128,128,128,.2)", marginTop: "3px", fontSize: "12px",
+    width: "auto", maxWidth: "min(320px, calc(100vw - 40px))", maxHeight: "min(60vh, 440px)",
     overflowY: "auto", overflowX: "hidden", overscrollBehavior: "contain",
     color: "CanvasText", backgroundColor: "Canvas",
   }, { "data-vocab-selection-popup": "true" });
-  const title = createHTML(doc, "strong");
-  title.textContent = short ? `${selectedText} · P.${pageIndex + 1}` : `句子翻译与多词收录 · P.${pageIndex + 1}`;
-  const output = createHTML(doc, "div", { whiteSpace: "pre-wrap", fontSize: "12px" }, { role: "status", "aria-live": "polite" });
-  output.textContent = automatic ? "正在查询翻译…" : "自动翻译已关闭，可直接收录或点击翻译。";
-  const translate = createHTML(doc, "button", { padding: "4px 8px" });
-  translate.textContent = "翻译选区";
-  box.append(title);
+  const controls = createHTML(doc, "div", { display: "flex", alignItems: "center", gap: "4px" });
+  const makeIconButton = (name, label) => {
+    const button = createHTML(doc, "button", { display: "inline-flex", alignItems: "center", justifyContent: "center", gap: "2px",
+      padding: "3px 5px", minHeight: "26px", border: "1px solid rgba(128,128,128,.3)", borderRadius: "5px", color: "CanvasText", backgroundColor: "Canvas" }, { "aria-label": label, title: label });
+    button.appendChild(selectionIcon(doc, name)); return button;
+  };
+  const translate = makeIconButton("translate", "翻译选区");
+  const dropdown = makeIconButton("collect", "展开收录单词或词组");
+  const chevron = selectionIcon(doc, "chevron"); dropdown.appendChild(chevron);
+  dropdown.setAttribute("aria-expanded", "false");
+  const panel = createHTML(doc, "div", { display: "none", flexDirection: "column", gap: "8px", width: "100%", maxHeight: "260px", overflowY: "auto", overscrollBehavior: "contain", padding: "5px 2px" });
+  panel.id = `vocab-selection-collector-${++selectionPopupSequence}`;
+  panel.hidden = true; dropdown.setAttribute("aria-controls", panel.id);
+  const output = createHTML(doc, "div", { display: "none", whiteSpace: "pre-wrap", fontSize: "12px", maxHeight: "160px", overflowY: "auto", padding: "4px 2px" }, { role: "status", "aria-live": "polite" });
+  output.hidden = true;
+  const fitPopup = () => {
+    if (!box.isConnected) return;
+    const viewportHeight = doc.defaultView?.innerHeight || doc.documentElement.clientHeight;
+    const top = box.getBoundingClientRect().top;
+    if (viewportHeight > 0) box.style.maxHeight = `${Math.min(360, Math.max(88, viewportHeight - Math.max(0, top) - 12))}px`;
+  };
+  const updateWidth = () => {
+    box.style.width = !panel.hidden || !output.hidden ? "320px" : "auto";
+    doc.defaultView?.requestAnimationFrame?.(fitPopup);
+  };
+  const setExpanded = expanded => {
+    panel.hidden = !expanded; panel.style.display = expanded ? "flex" : "none";
+    dropdown.setAttribute("aria-expanded", String(expanded));
+    dropdown.setAttribute("aria-label", expanded ? "收起收词面板" : "展开收录单词或词组");
+    dropdown.title = expanded ? "收起收词面板" : "收录单词或词组";
+    chevron.style.transform = expanded ? "rotate(180deg)" : "";
+    updateWidth();
+  };
+  dropdown.addEventListener("click", () => setExpanded(panel.hidden));
+  box.addEventListener("keydown", event => {
+    if (event.key === "Escape" && !panel.hidden) { event.stopPropagation(); setExpanded(false); dropdown.focus(); }
+  });
+  controls.append(translate, dropdown); box.append(controls, output, panel);
+  const caption = createHTML(doc, "div", { fontSize: "11px", maxHeight: "36px", overflow: "hidden", color: "GrayText" }, { title: selectedText });
+  caption.textContent = `${selectedText} · P.${pageIndex + 1}`;
+  panel.appendChild(caption);
   if (short) {
-    const speak = createHTML(doc, "button", { alignSelf: "flex-start", padding: "2px 7px" });
-    speak.textContent = "🔊 发音";
+    const speak = makeIconButton("audio", "播放发音");
     speak.addEventListener("click", () => playAudio(doc, selectedText));
-    box.append(speak);
+    const line = createHTML(doc, "div", { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "6px" });
+    const label = createHTML(doc, "span", { fontSize: "11px" }); label.textContent = "收词选项";
+    line.append(label, speak); panel.appendChild(line);
   }
-  box.append(output, translate);
-  let richInfo = { phonetic: "", combinedMeaning: "" };
-  let translated = "";
-  let pending = Promise.resolve();
+  let translated = "", pending = Promise.resolve();
+  const requests = new Map();
+  const getInfo = word => {
+    const key = word.toLowerCase();
+    if (!requests.has(key)) {
+      const promise = Promise.resolve().then(() => lookup(word)).then(info => {
+        if (!info?.ok) requests.delete(key);
+        return info;
+      }, error => { requests.delete(key); throw error; });
+      requests.set(key, promise);
+    }
+    return requests.get(key);
+  };
+  const lookupForSave = word => {
+    const saved = getVocabList().find(entry => entry.word.toLowerCase() === word.toLowerCase());
+    return hasWordMeaning(saved?.meaning)
+      ? Promise.resolve({ ok: true, phonetic: saved.phonetic, combinedMeaning: saved.meaning }) : getInfo(word);
+  };
   const query = async () => {
-    translate.disabled = true;
-    output.textContent = "正在查询翻译…";
+    translate.disabled = true; output.hidden = false; output.style.display = "block"; updateWidth();
+    output.textContent = "正在查询…";
     try {
-      // Keep the collector available for arbitrarily long selections. Large passages
-      // translate only an explicitly labelled UTF-8 prefix within Baidu's query limit.
       let queryText = selectedText;
       while (new TextEncoder().encode(queryText).length > 5500) queryText = queryText.slice(0, -100);
       if (short) {
-        richInfo = await fetchWordRichInfo(queryText);
-        output.textContent = richInfo.combinedMeaning;
-        if (richInfo.phonetic) title.textContent = `${selectedText} ${richInfo.phonetic} · P.${pageIndex + 1}`;
+        const info = await getInfo(queryText);
+        output.textContent = info?.ok ? [info.phonetic, info.combinedMeaning].filter(Boolean).join(" ") : "暂未查到释义，可重试或手动填写。";
       } else {
         const result = await translateWithBaidu(queryText);
         translated = result.ok ? result.text : "";
         if (translated && queryText.length < selectedText.length) translated = "（长选区，仅翻译开头部分）" + translated;
         output.textContent = result.ok ? translated : result.text;
       }
-    } catch (error) {
-      output.textContent = "翻译失败，可重试或先保存生词。";
-    } finally { translate.disabled = false; }
+    } catch (error) { output.textContent = "查询失败，可重试或先收录后补充。"; }
+    finally { translate.disabled = false; updateWidth(); }
   };
   translate.addEventListener("click", () => { if (!translate.disabled) pending = query(); });
-  if (automatic) pending = query();
-  const getContext = () => ({
-    contextSentence: short ? "" : selectedText, contextTrans: translated,
-    sourceTitle: paperTitle, itemID: parentID, attachmentID, pageIndex, position,
+  const getContext = () => ({ contextSentence: selectedText, contextTrans: translated,
+    sourceTitle: paperTitle, itemID: parentID, attachmentID, pageIndex, position });
+  const tabs = createHTML(doc, "div", { display: "flex", gap: "5px" }, { role: "group", "aria-label": "收录方式" });
+  const wordTab = createHTML(doc, "button", { padding: "3px 9px", borderRadius: "5px", border: "1px solid rgba(128,128,128,.3)" }, { "aria-pressed": "true" }); wordTab.textContent = "单词";
+  const phraseTab = createHTML(doc, "button", { padding: "3px 9px", borderRadius: "5px", border: "1px solid rgba(128,128,128,.3)" }, { "aria-pressed": "false" }); phraseTab.textContent = "词组";
+  const wordPane = createHTML(doc, "div");
+  const phrasePane = createHTML(doc, "div", { display: "none" }); phrasePane.hidden = true;
+  const choose = phrase => {
+    wordPane.hidden = phrase; wordPane.style.display = phrase ? "none" : "block";
+    phrasePane.hidden = !phrase; phrasePane.style.display = phrase ? "block" : "none";
+    for (const [tab, active] of [[wordTab, !phrase], [phraseTab, phrase]]) {
+      tab.setAttribute("aria-pressed", String(active));
+      setButtonColors(tab, active ? "#285cba" : "ButtonFace", active ? "white" : "ButtonText");
+    }
+  };
+  wordTab.addEventListener("click", () => choose(false)); phraseTab.addEventListener("click", () => choose(true));
+  tabs.append(wordTab, phraseTab); panel.append(tabs, wordPane, phrasePane);
+  appendWordPicker(doc, wordPane, selectedText, getContext, () => pending, {
+    lookup: lookupForSave, delay, allowUntranslated: true,
+    getPosition: word => resolveWordPosition(reader, word, position, selectedText),
   });
-  if (short) {
-    const contextInput = createHTML(doc, "input", { padding: "4px 6px" }, { type: "text", placeholder: "可选：原句例句或笔记" });
-    const save = createHTML(doc, "button", { padding: "5px 8px", backgroundColor: "#247a3c", color: "white" });
-    save.textContent = "➕ 加入生词本";
-    save.addEventListener("click", async () => {
-      if (save.disabled) return;
-      save.disabled = true;
-      try {
-        await pending;
-        addOrUpdateWord({ ...getContext(), position: await resolveWordPosition(reader, selectedText, position), contextSentence: contextInput.value.trim(), word: selectedText,
-          phonetic: richInfo.phonetic, meaning: richInfo.combinedMeaning });
-        save.textContent = "已收入生词本";
-      } catch (error) {
-        save.disabled = false;
-        save.textContent = "收录失败，请重试";
-      }
-    });
-    box.append(contextInput, save);
-  }
-  if (!short || extractWords(selectedText).length > 1) {
-    appendWordPicker(doc, box, selectedText, () => ({ ...getContext(), contextSentence: selectedText }),
-      () => pending, {
-        lookup: automatic ? fetchWordRichInfo : async () => ({ ok: true, phonetic: "", combinedMeaning: "" }),
-        delay: automatic ? undefined : async () => {},
-        getPosition: word => resolveWordPosition(reader, word, position, selectedText),
-      });
-  }
+  appendPhrasePicker(doc, phrasePane, selectedText, getContext, {
+    lookup: lookupForSave, ready: () => pending,
+    getPosition: phrase => resolveWordPosition(reader, phrase, position, selectedText),
+  });
+  choose(short && extractWords(selectedText).length > 1);
   append(box);
+  if (automatic) pending = query();
 }
 
 function onMainWindowLoad({ window }) {

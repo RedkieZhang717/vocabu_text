@@ -5,6 +5,19 @@
     <label><html:h2>多功能单词本</html:h2></label>
     <html:p>在 Zotero 中收录生词、复习闪卡，管理文献阅读进度与笔记。</html:p>
     <html:button id="vocab-guide" type="button">打开使用教程</html:button>
+    <html:p>联系邮箱：<html:span>ivydeldago@163.com</html:span></html:p>
+  </groupbox>
+  <groupbox>
+    <label><html:h2>使用介绍</html:h2></label>
+    <html:ol>
+      <html:li>PDF 中划选文字后，点击小翻译图标查询；点击旁边的下拉图标展开收词面板，候选词可滚动查看。</html:li>
+      <html:li>“单词”模式可多选并分别加入。“词组”模式先点起词、再点结尾，或直接输入／编辑词组，整组保存。</html:li>
+      <html:li>关闭自动翻译后，划选不会立即联网；点击收录时仍会查询所选词或词组的释义。查询失败会标记“待补充释义”。</html:li>
+      <html:li>右侧单词本可切换当前文献／全部生词、搜索、修改释义和补查空释义。点击定位入口返回 PDF 原词。</html:li>
+      <html:li>“闪卡背词”翻面后按生疏／模糊／掌握评分；“导出 Anki”复制当前文献范围或全部词条的 TSV 文本。</html:li>
+      <html:li>主窗口工具栏的书本图标打开阅读管理，可筛选已读／未读，展开生词卡片并保存阅读笔记。切换文献列表后点击刷新。</html:li>
+    </html:ol>
+    <html:p>阅读笔记与已读标记目前只保存在本机。草稿在当前窗口内保留，关闭窗口前请保存。</html:p>
   </groupbox>
   <groupbox>
     <label><html:h2>百度翻译</html:h2></label>
@@ -23,9 +36,9 @@
     <label><html:h2>阅读与查词</html:h2></label>
     <html:label class="vocab-check"><html:input id="vocab-popup" type="checkbox" />启用 PDF 划词弹窗</html:label>
     <html:label class="vocab-check"><html:input id="vocab-auto-translate" type="checkbox" />选中文字后自动翻译</html:label>
-    <html:p>关闭自动翻译后，划词和多选收录仍可使用；点击“翻译选区”才会查询翻译，或直接保存后手动填写释义。</html:p>
+    <html:p>此开关控制划选后是否立即查询。关闭后仅显示小翻译图标与下拉收词入口；点击翻译、收录单词／词组或补查释义时，仍会主动查询。手填词组释义可跳过该词组查询。</html:p>
     <html:label class="vocab-check"><html:input id="vocab-dictionary" type="checkbox" />使用有道词典补充音标和释义</html:label>
-    <html:p>选项立即生效。长选区支持滚动。划选句子后，可点选多个单词，分别入库并保留例句和页码。短语仍可整体收录。生词卡片中的“修改释义”可纠正翻译。</html:p>
+    <html:p>选项立即生效。下拉面板中的候选词和词组均支持滚动。人工修改过的释义会保留；“补查释义”可修复旧的空释义词条。</html:p>
   </groupbox>
   <groupbox>
     <label><html:h2>数据</html:h2></label>

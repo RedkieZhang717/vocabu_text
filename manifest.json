@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "多功能单词本",
-  "version": "2.5.1",
+  "version": "2.6.0",
   "description": "面向 Zotero 的多功能单词本：划词与批量收录、可选翻译、原词定位、释义纠错、闪卡复习、Anki 导出，以及文献阅读卡片和笔记。",
   "author": "RedkieZhang717",
   "homepage_url": "https://github.com/RedkieZhang717/vocabu_text",
