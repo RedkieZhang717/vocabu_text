@@ -1498,8 +1498,8 @@ async function renderSelectionPopup(event, { lookup = fetchWordRichInfo, delay }
   const box = createHTML(doc, "div", {
     display: "flex", flexDirection: "column", gap: "5px", padding: "4px 6px",
     borderTop: "1px solid rgba(128,128,128,.2)", marginTop: "3px", fontSize: "12px",
-    width: "auto", maxWidth: "min(320px, calc(100vw - 40px))", maxHeight: "min(60vh, 440px)",
-    overflowY: "auto", overflowX: "hidden", overscrollBehavior: "contain",
+    width: "280px", maxWidth: "calc(100vw - 40px)", maxHeight: "min(60vh, 440px)",
+    overflowY: "auto", overflowX: "hidden", overscrollBehavior: "contain", scrollbarGutter: "stable",
     color: "CanvasText", backgroundColor: "Canvas",
   }, { "data-vocab-selection-popup": "true" });
   const controls = createHTML(doc, "div", { display: "flex", alignItems: "center", gap: "4px" });
@@ -1523,17 +1523,15 @@ async function renderSelectionPopup(event, { lookup = fetchWordRichInfo, delay }
     const top = box.getBoundingClientRect().top;
     if (viewportHeight > 0) box.style.maxHeight = `${Math.min(360, Math.max(88, viewportHeight - Math.max(0, top) - 12))}px`;
   };
-  const updateWidth = () => {
-    box.style.width = !panel.hidden || !output.hidden ? "320px" : "auto";
-    doc.defaultView?.requestAnimationFrame?.(fitPopup);
-  };
+  // Keep the same outer width for controls, translation and collection details.
+  const scheduleFit = () => doc.defaultView?.requestAnimationFrame?.(fitPopup);
   const setExpanded = expanded => {
     panel.hidden = !expanded; panel.style.display = expanded ? "flex" : "none";
     dropdown.setAttribute("aria-expanded", String(expanded));
     dropdown.setAttribute("aria-label", expanded ? "收起收词面板" : "展开收录单词或词组");
     dropdown.title = expanded ? "收起收词面板" : "收录单词或词组";
     chevron.style.transform = expanded ? "rotate(180deg)" : "";
-    updateWidth();
+    scheduleFit();
   };
   dropdown.addEventListener("click", () => setExpanded(panel.hidden));
   box.addEventListener("keydown", event => {
@@ -1569,7 +1567,7 @@ async function renderSelectionPopup(event, { lookup = fetchWordRichInfo, delay }
       ? Promise.resolve({ ok: true, phonetic: saved.phonetic, combinedMeaning: saved.meaning }) : getInfo(word);
   };
   const query = async () => {
-    translate.disabled = true; output.hidden = false; output.style.display = "block"; updateWidth();
+    translate.disabled = true; output.hidden = false; output.style.display = "block"; scheduleFit();
     output.textContent = "正在查询…";
     try {
       let queryText = selectedText;
@@ -1584,7 +1582,7 @@ async function renderSelectionPopup(event, { lookup = fetchWordRichInfo, delay }
         output.textContent = result.ok ? translated : result.text;
       }
     } catch (error) { output.textContent = "查询失败，可重试或先收录后补充。"; }
-    finally { translate.disabled = false; updateWidth(); }
+    finally { translate.disabled = false; scheduleFit(); }
   };
   translate.addEventListener("click", () => { if (!translate.disabled) pending = query(); });
   const getContext = () => ({ contextSentence: selectedText, contextTrans: translated,
