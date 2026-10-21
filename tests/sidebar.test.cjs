@@ -322,7 +322,7 @@ test('short selection still offers pronunciation while automatic translation is 
   await context.renderSelectionPopup({ reader: {}, doc: dom.window.document,
     params: { annotation: { text: 'evidence' } }, append: value => { popup = value; } });
   popup.querySelector('[aria-controls]').click();
-  popup.querySelector('[aria-label="播放发音"]').click();
+  popup.querySelector('[aria-label="播放 evidence 的发音"]').click();
   assert.equal(spoken, 'evidence');
 });
 
@@ -440,4 +440,118 @@ test('a successful stored definition is retained if an empty lookup is saved lat
   h.context.addOrUpdateWord({word:'evidence',meaning:'暂无释义',itemID:9});
   assert.equal(h.context.getVocabList()[0].meaning,'证据');
   assert.equal(h.context.getVocabList()[0].meaningPending,false);
+});
+
+
+function audioHarness(options = {}) {
+  const h = harness();
+  const revoked = [], created = [], requests = [];
+  class FakeAudio extends h.dom.window.EventTarget {
+    constructor() { super(); this.paused=true;created.push(this); }
+    play() {
+      this.paused=false;
+      if(options.reject) return Promise.reject(new Error('decoder rejected'));
+      queueMicrotask(()=>{
+        this.dispatchEvent(new h.dom.window.Event('playing'));
+        if(options.end !== false) this.dispatchEvent(new h.dom.window.Event('ended'));
+      });
+      return Promise.resolve();
+    }
+    pause() { this.paused=true; }
+    removeAttribute() {}
+    load() {}
+  }
+  h.context.Zotero.getMainWindow=()=>({Audio:FakeAudio,Blob,URL:{
+    createObjectURL:()=>`blob:test-${created.length}`,revokeObjectURL:value=>revoked.push(value),
+  }});
+  h.dom.window.Audio=function(){throw new Error('reader media must not be used');};
+  h.context.Zotero.HTTP.request=async(method,url,config)=>{
+    requests.push({method,url,config});
+    return {response:new Uint8Array([0x49,0x44,0x33,0,1,2]).buffer};
+  };
+  return {...h,created,revoked,requests};
+}
+
+test('pronunciation plays a retained audio blob in the main window and releases it on completion', async () => {
+  const h=audioHarness(), phases=[];
+  const promise=h.context.playAudio(h.dom.window.document,'in terms of',(phase)=>phases.push(phase));
+  assert.equal(await promise,true);
+  assert.deepEqual(phases,['loading','playing','ended']);
+  assert.equal(h.requests[0].config.responseType,'arraybuffer');
+  assert.match(h.requests[0].url,/audio=in%20terms%20of/);
+  assert.equal(h.created[0].muted,false);assert.equal(h.created[0].volume,1);
+  assert.equal(h.created[0].paused,true);assert.equal(h.revoked.length,1);
+  assert.equal(h.context.activePronunciation,null);
+});
+
+test('audio download and decoder failures produce visible retry feedback', async () => {
+  for(const failure of ['network','invalid','decoder']) {
+    const h=audioHarness({reject:failure==='decoder'});
+    if(failure==='network')h.context.Zotero.HTTP.request=async()=>{throw new Error('offline');};
+    if(failure==='invalid')h.context.Zotero.HTTP.request=async()=>({response:new TextEncoder().encode('<html>Not audio</html>').buffer});
+    const doc=h.dom.window.document,control=doc.createElement('button'),container=doc.createElement('div');container.append(control);
+    const feedback=h.context.bindAudioControl(doc,control,'opaque',container);
+    control.click();await tick();
+    assert.equal(control.dataset.audioState,'error',failure);
+    assert.equal(feedback.hidden,false);assert.match(feedback.textContent,/失败|重试/);
+    assert.equal(control.getAttribute('aria-busy'),'false');
+    assert.equal(h.context.activePronunciation,null);
+  }
+});
+
+test('replaying stops the previous audio and unload releases the active player', async () => {
+  const h=audioHarness({end:false});
+  const first=h.context.playAudio(h.dom.window.document,'first');await tick();
+  const second=h.context.playAudio(h.dom.window.document,'second');await tick();
+  assert.equal(await first,false);assert.equal(h.created[0].paused,true);
+  assert.equal(h.created[1].paused,false);
+  h.context.stopPronunciation();assert.equal(await second,false);
+  assert.equal(h.created[1].paused,true);assert.equal(h.revoked.length,2);
+});
+
+test('cancelled audio downloads cannot start playing after a newer request', async () => {
+  const h=audioHarness();let release;
+  const original=h.context.Zotero.HTTP.request;
+  h.context.Zotero.HTTP.request=(method,url,config)=>url.includes('slow')
+    ?new Promise(resolve=>{release=resolve;}):original(method,url,config);
+  const first=h.context.playAudio(h.dom.window.document,'slow');
+  const second=h.context.playAudio(h.dom.window.document,'fast');
+  assert.equal(await second,true);
+  release({response:new Uint8Array([0x49,0x44,0x33,0]).buffer});
+  assert.equal(await first,false);assert.equal(h.created.length,1);
+});
+
+test('popup controls isolate text selection while phrase inputs keep native editing shortcuts', async () => {
+  const h=harness();h.prefs.set('extensions.vocabbook.autoTranslate',false);
+  const popup=await popupFor(h,'in terms of');h.dom.window.document.body.append(popup);
+  let leaked=0;
+  h.dom.window.document.body.addEventListener('mousedown',()=>leaked++);
+  h.dom.window.document.body.addEventListener('keydown',()=>leaked++);
+  popup.querySelector('[aria-controls]').dispatchEvent(new h.dom.window.MouseEvent('mousedown',{bubbles:true}));
+  const selectAll=new h.dom.window.KeyboardEvent('keydown',{key:'a',ctrlKey:true,bubbles:true,cancelable:true});
+  popup.querySelector('[aria-controls]').dispatchEvent(selectAll);
+  assert.equal(selectAll.defaultPrevented,true);assert.equal(leaked,0);
+  popup.querySelector('[aria-controls]').click();
+  const input=popup.querySelector('[aria-label="要收录的词组"]');
+  const editing=new h.dom.window.KeyboardEvent('keydown',{key:'a',ctrlKey:true,bubbles:true,cancelable:true});
+  input.dispatchEvent(editing);
+  assert.equal(editing.defaultPrevented,false);assert.equal(leaked,0);
+  assert.equal(input.style.userSelect,'text');
+  assert.equal(popup.style.userSelect,'none');
+});
+
+
+test('opening popup clears only an intersecting outer-frame selection, preserving unrelated text ranges', async () => {
+  const h=harness();h.prefs.set('extensions.vocabbook.autoTranslate',false);
+  const doc=h.dom.window.document,popup=await popupFor(h,'in terms of');
+  const source=doc.createElement('p');source.textContent='Original PDF context';doc.body.append(source,popup);
+  const selection=h.dom.window.getSelection();
+  const range=doc.createRange();range.selectNodeContents(source);selection.addRange(range);
+  popup.querySelector('[aria-controls]').click();
+  assert.equal(selection.toString(),'Original PDF context');
+  const accidental=doc.createRange();accidental.selectNodeContents(popup);
+  selection.removeAllRanges();selection.addRange(accidental);
+  popup.querySelector('[aria-controls]').click();
+  assert.equal(selection.rangeCount,0);
+  assert.equal(popup.querySelector('[aria-label="要收录的词组"]').value,'in terms of');
 });

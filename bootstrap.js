@@ -29,6 +29,7 @@ function createHTML(doc, tag, styles = {}, attrs = {}) {
       ...(tag === "button" ? { appearance: "none", backgroundImage: "none" } : {}),
       ...(tag === "button" ? { whiteSpace: "normal", flexShrink: "0" } : {}),
     } : {}),
+    ...(["input", "textarea"].includes(tag) ? { userSelect: "text", MozUserSelect: "text" } : {}),
   }, styles);
   if (tag === "button") {
     el.setAttribute("type", "button");
@@ -138,18 +139,100 @@ function md5(str) {
   return Array.from(out, (b) => ("0" + b.toString(16)).slice(-2)).join("");
 }
 
-// 播放英文发音
-function playAudio(doc, word) {
+// The reader document cannot decode remote media reliably. Download through
+// Zotero's HTTP client and play a retained blob in the main application window.
+var activePronunciation = null;
+
+function stopPronunciation() {
+  activePronunciation?.finish("idle");
+}
+
+async function playAudio(doc, word, onState = () => {}) {
+  stopPronunciation();
+  const text = String(word || "").trim();
+  if (!text) return false;
+  const owner = Zotero.getMainWindow?.() || Zotero.getMainWindows?.()[0] || doc.defaultView;
+  const state = { owner, audio: null, objectURL: null, timer: null, resolve: null, finished: false, started: false };
+  const notify = (phase, message = "") => {
+    try { onState(phase, message); } catch (_) {}
+  };
+  const playing = () => {
+    if (state.finished || state.started) return;
+    state.started = true;
+    clearTimeout(state.timer);
+    notify("playing", "正在播放发音…");
+    state.timer = setTimeout(() => state.finish("error", "发音播放超时，点击重试"), 45000);
+  };
+  const ended = () => state.finish("ended", "播放结束");
+  const failed = () => state.finish("error", "发音播放失败，点击重试");
+  state.finish = (phase, message = "") => {
+    if (state.finished) return;
+    state.finished = true;
+    clearTimeout(state.timer);
+    if (state.audio) {
+      state.audio.removeEventListener("playing", playing);
+      state.audio.removeEventListener("ended", ended);
+      state.audio.removeEventListener("error", failed);
+      try { state.audio.pause(); state.audio.removeAttribute("src"); state.audio.load(); } catch (_) {}
+    }
+    if (state.objectURL) { try { owner.URL.revokeObjectURL(state.objectURL); } catch (_) {} }
+    if (activePronunciation === state) activePronunciation = null;
+    notify(phase, message);
+    state.resolve?.(phase === "ended");
+  };
+  activePronunciation = state;
+  notify("loading", "正在加载发音…");
   try {
-    const WinAudio = doc.defaultView?.Audio || Audio;
-    const audio = new WinAudio(
-      "https://dict.youdao.com/dictvoice?type=2&audio=" +
-        encodeURIComponent(word.trim())
-    );
-    audio.play().catch((e) => Zotero.debug("[VocabBook] 语音播放失败: " + e));
-  } catch (e) {
-    Zotero.debug("[VocabBook] 语音播放失败: " + e);
+    if (!owner?.Audio || !owner.Blob || !owner.URL?.createObjectURL) throw new Error("Audio window unavailable");
+    const response = await Zotero.HTTP.request("GET",
+      "https://dict.youdao.com/dictvoice?type=2&audio=" + encodeURIComponent(text),
+      { responseType: "arraybuffer", timeout: 12000 });
+    if (state.finished || activePronunciation !== state) return false;
+    const bytes = new Uint8Array(response.response);
+    const mp3 = bytes.length > 3 && ((bytes[0] === 0x49 && bytes[1] === 0x44 && bytes[2] === 0x33)
+      || (bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0));
+    if (!mp3) throw new Error("Invalid pronunciation audio");
+    state.objectURL = owner.URL.createObjectURL(new owner.Blob([response.response], { type: "audio/mpeg" }));
+    const audio = state.audio = new owner.Audio();
+    audio.preload = "auto"; audio.volume = 1; audio.muted = false;
+    audio.addEventListener("playing", playing);
+    audio.addEventListener("ended", ended);
+    audio.addEventListener("error", failed);
+    audio.src = state.objectURL;
+    return await new Promise(resolve => {
+      state.resolve = resolve;
+      state.timer = setTimeout(() => state.finish("error", "发音加载超时，点击重试"), 10000);
+      try { Promise.resolve(audio.play()).catch(failed); }
+      catch (_) { failed(); }
+    });
+  } catch (error) {
+    if (!state.finished) state.finish("error", "发音加载失败，请检查网络后点击重试");
+    return false;
   }
+}
+
+function bindAudioControl(doc, control, word, container) {
+  if (control.localName !== "button") {
+    control.setAttribute("role", "button"); control.tabIndex = 0;
+    control.addEventListener("keydown", event => {
+      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); control.click(); }
+    });
+  }
+  control.setAttribute("aria-label", `播放 ${word} 的发音`);
+  const feedback = createHTML(doc, "span", { display: "none", fontSize: "11px", overflowWrap: "anywhere" }, { role: "status", "aria-live": "polite" });
+  feedback.hidden = true;
+  container.appendChild(feedback);
+  control.addEventListener("click", () => {
+    playAudio(doc, word, (phase, message) => {
+      control.dataset.audioState = phase;
+      control.setAttribute("aria-busy", String(phase === "loading"));
+      control.title = phase === "error" ? message : phase === "playing" ? "正在播放；再次点击可重播" : "点击播放发音";
+      feedback.textContent = message;
+      feedback.hidden = !["loading", "playing", "ended", "error"].includes(phase);
+      feedback.style.display = feedback.hidden ? "none" : "block";
+    });
+  });
+  return feedback;
 }
 
 // ==========================================
@@ -878,7 +961,7 @@ function renderSidebarView(state) {
         cursor: "pointer",
       });
       wordBig.textContent = `${cur.word} 🔊`;
-      wordBig.addEventListener("click", () => playAudio(doc, cur.word));
+      bindAudioControl(doc, wordBig, cur.word, cardBox);
 
       const phoneEl = createHTML(doc, "div", {
         fontSize: "12px",
@@ -1178,7 +1261,7 @@ function renderSidebarView(state) {
       });
       wordTitle.textContent = itemObj.word;
       wordTitle.title = "点击朗读发音";
-      wordTitle.addEventListener("click", () => playAudio(doc, itemObj.word));
+      bindAudioControl(doc, wordTitle, itemObj.word, card);
 
       const audioIcon = createHTML(doc, "span", {
         cursor: "pointer",
@@ -1188,7 +1271,7 @@ function renderSidebarView(state) {
       audioIcon.textContent = itemObj.phonetic
         ? `${itemObj.phonetic} 🔊`
         : "🔊";
-      audioIcon.addEventListener("click", () => playAudio(doc, itemObj.word));
+      bindAudioControl(doc, audioIcon, itemObj.word, card);
 
       leftGroup.appendChild(wordTitle);
       leftGroup.appendChild(audioIcon);
@@ -1500,7 +1583,7 @@ async function renderSelectionPopup(event, { lookup = fetchWordRichInfo, delay }
     borderTop: "1px solid rgba(128,128,128,.2)", marginTop: "3px", fontSize: "12px",
     width: "280px", maxWidth: "calc(100vw - 40px)", maxHeight: "min(60vh, 440px)",
     overflowY: "auto", overflowX: "hidden", overscrollBehavior: "contain", scrollbarGutter: "stable",
-    color: "CanvasText", backgroundColor: "Canvas",
+    color: "CanvasText", backgroundColor: "Canvas", userSelect: "none", MozUserSelect: "none",
   }, { "data-vocab-selection-popup": "true" });
   const controls = createHTML(doc, "div", { display: "flex", alignItems: "center", gap: "4px" });
   const makeIconButton = (name, label) => {
@@ -1517,6 +1600,17 @@ async function renderSelectionPopup(event, { lookup = fetchWordRichInfo, delay }
   panel.hidden = true; dropdown.setAttribute("aria-controls", panel.id);
   const output = createHTML(doc, "div", { display: "none", whiteSpace: "pre-wrap", fontSize: "12px", maxHeight: "160px", overflowY: "auto", padding: "4px 2px" }, { role: "status", "aria-live": "polite" });
   output.hidden = true;
+  const clearPopupSelection = () => {
+    if (!box.isConnected || doc.activeElement?.closest?.("input, textarea")) return;
+    // PDF text is selected in its own inner frame. An outer reader selection
+    // intersecting these tools only paints our labels blue/grey in Gecko.
+    const selection = doc.defaultView?.getSelection?.();
+    try {
+      for (let i = 0; i < (selection?.rangeCount || 0); i++) {
+        if (selection.getRangeAt(i).intersectsNode(box)) { selection.removeAllRanges(); break; }
+      }
+    } catch (_) {}
+  };
   const fitPopup = () => {
     if (!box.isConnected) return;
     const viewportHeight = doc.defaultView?.innerHeight || doc.documentElement.clientHeight;
@@ -1524,17 +1618,29 @@ async function renderSelectionPopup(event, { lookup = fetchWordRichInfo, delay }
     if (viewportHeight > 0) box.style.maxHeight = `${Math.min(360, Math.max(88, viewportHeight - Math.max(0, top) - 12))}px`;
   };
   // Keep the same outer width for controls, translation and collection details.
-  const scheduleFit = () => doc.defaultView?.requestAnimationFrame?.(fitPopup);
+  const scheduleFit = () => doc.defaultView?.requestAnimationFrame?.(() => { fitPopup(); clearPopupSelection(); });
   const setExpanded = expanded => {
     panel.hidden = !expanded; panel.style.display = expanded ? "flex" : "none";
     dropdown.setAttribute("aria-expanded", String(expanded));
     dropdown.setAttribute("aria-label", expanded ? "收起收词面板" : "展开收录单词或词组");
     dropdown.title = expanded ? "收起收词面板" : "收录单词或词组";
     chevron.style.transform = expanded ? "rotate(180deg)" : "";
+    clearPopupSelection();
     scheduleFit();
   };
   dropdown.addEventListener("click", () => setExpanded(panel.hidden));
+  // A click or drag in the floating tools must not become a PDF text selection.
+  for (const type of ["pointerdown", "mousedown", "dblclick"]) {
+    box.addEventListener(type, event => { event.stopPropagation(); clearPopupSelection(); });
+  }
+  box.addEventListener("selectstart", event => {
+    if (!event.target.closest("input, textarea")) event.preventDefault();
+  });
   box.addEventListener("keydown", event => {
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "a") {
+      event.stopPropagation();
+      if (!event.target.closest("input, textarea")) { event.preventDefault(); clearPopupSelection(); }
+    }
     if (event.key === "Escape" && !panel.hidden) { event.stopPropagation(); setExpanded(false); dropdown.focus(); }
   });
   controls.append(translate, dropdown); box.append(controls, output, panel);
@@ -1543,10 +1649,10 @@ async function renderSelectionPopup(event, { lookup = fetchWordRichInfo, delay }
   panel.appendChild(caption);
   if (short) {
     const speak = makeIconButton("audio", "播放发音");
-    speak.addEventListener("click", () => playAudio(doc, selectedText));
     const line = createHTML(doc, "div", { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "6px" });
     const label = createHTML(doc, "span", { fontSize: "11px" }); label.textContent = "收词选项";
     line.append(label, speak); panel.appendChild(line);
+    bindAudioControl(doc, speak, selectedText, panel);
   }
   let translated = "", pending = Promise.resolve();
   const requests = new Map();
@@ -1612,6 +1718,7 @@ async function renderSelectionPopup(event, { lookup = fetchWordRichInfo, delay }
   });
   choose(short && extractWords(selectedText).length > 1);
   append(box);
+  scheduleFit();
   if (automatic) pending = query();
 }
 
@@ -1623,11 +1730,13 @@ function onMainWindowLoad({ window }) {
 }
 
 function onMainWindowUnload({ window }) {
+  if (activePronunciation?.owner === window) stopPronunciation();
   readingDashboard?.uninstall(window);
   window.document.querySelector('[href="vocab-book-ui.ftl"]')?.remove();
 }
 
 function shutdown() {
+  stopPronunciation();
   readingDashboard?.shutdown();
   readingDashboard = null;
   if (registeredSectionID) {
