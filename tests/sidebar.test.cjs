@@ -91,7 +91,7 @@ test('search and manual add update the visible list', async () => {
   assert.match(state.body.textContent, /gamma/);
 });
 
-test('search ranks headwords over definitions and examples, and tolerates a spelling swap', () => {
+test('default search matches only headwords, with spelling suggestions only when no direct match exists', () => {
   const { state, dom } = harness([
     { ...word('source'), contextSentence: 'We found evidence.' },
     { ...word('proof'), meaning: 'evidence; 证据' },
@@ -104,19 +104,60 @@ test('search ranks headwords over definitions and examples, and tolerates a spel
     input.dispatchEvent(new dom.window.Event('input'));
     return [...state.body.querySelectorAll('strong')].map(node => node.textContent);
   };
-  assert.deepEqual(search('  ＥＶＩＤＥＮＣＥ  '), ['evidence', 'evidence base', 'proof', 'source']);
+  assert.deepEqual(search('  ＥＶＩＤＥＮＣＥ  '), ['evidence', 'evidence base']);
+  assert.equal(state.body.querySelector('[data-vocab-search-notice]').hidden, true);
   assert.deepEqual(search('evidnece'), ['evidence', 'evidence base']);
-  assert.deepEqual(search('证据'), ['proof']);
+  assert.equal(state.body.querySelector('[data-vocab-search-notice]').hidden, false);
+  assert.deepEqual(search('证据'), []);
   assert.deepEqual(search('wellknown'), ['well-known']);
   assert.deepEqual(search('cafe'), ['café']);
   assert.deepEqual(search('in   trms'), ['in terms of']);
   assert.deepEqual(search('evd'), []);
 });
 
+test('regression: ex excludes macro and miscalibrated even when their examples contain extracts and exhibit', () => {
+  const { state, dom, context } = harness([
+    { ...word('macro'), contextSentence: 'a novel diagnostic framework that extracts rich process-level features from macro dynamics' },
+    { ...word('miscalibrated'), contextSentence: 'Agents in debate often exhibit miscalibrated confidence' },
+    { ...word('some'), meaning: 'for example' },
+    word('complex'), word('extract'), word('example'), word('ex'),
+  ]);
+  const input = state.body.querySelector('[aria-label="搜索生词"]');
+  const scope = state.body.querySelector('[aria-label="搜索范围"]');
+  const titles = () => [...state.body.querySelectorAll('strong')].map(node => node.textContent);
+  const changeScope = value => { scope.value = value; scope.dispatchEvent(new dom.window.Event('change')); };
+  input.value = 'ex'; input.dispatchEvent(new dom.window.Event('input'));
+  assert.deepEqual(titles(), ['ex', 'extract', 'example', 'complex']);
+  changeScope('context');
+  assert.deepEqual(titles(), ['macro', 'miscalibrated']);
+  changeScope('meaning');
+  assert.deepEqual(titles(), ['some']);
+  changeScope('all');
+  assert.equal(titles().length, 7);
+  changeScope('word');
+  assert.deepEqual(titles(), ['ex', 'extract', 'example', 'complex']);
+  assert.equal(state.body.querySelector('[aria-label="搜索生词"]'), input);
+  context.renderSidebarContent(state);
+  assert.equal(state.body.querySelector('[aria-label="搜索范围"]').value, 'word');
+  assert.equal(state.body.querySelector('[aria-label="搜索生词"]').value, 'ex');
+});
+
+test('valid direct matches do not mix with edit-distance neighbors, and spelling fallback respects filters', () => {
+  const { context, state } = harness([word('word'), word('work'), word('sword'), word('world', 2)]);
+  state.searchQuery = 'word';
+  assert.deepEqual(Array.from(context.filterVocabWords(context.getVocabList(), state), x => x.word), ['word', 'sword']);
+  state.searchQuery = 'wrold'; state.masteryFilter = 0;
+  assert.equal(context.filterVocabWords(context.getVocabList(), state).length, 0);
+  state.masteryFilter = -1;
+  assert.deepEqual(Array.from(context.filterVocabWords(context.getVocabList(), state), x => x.word), ['world']);
+});
+
 test('composing a Chinese query keeps the input, caret and Zotero sidebar mount stable', async () => {
   const { context, state, dom, hooks } = harness([{ ...word('evidence'), meaning: '证据' }, word('other')]);
   await context.startup({});
   const input = state.body.querySelector('input[placeholder^="🔍"]');
+  const scope = state.body.querySelector('[aria-label="搜索范围"]');
+  scope.value = 'meaning'; scope.dispatchEvent(new dom.window.Event('change'));
   input.focus();
   input.dispatchEvent(new dom.window.CompositionEvent('compositionstart'));
   input.value = 'zheng';

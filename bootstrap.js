@@ -854,10 +854,12 @@ function typoDistance(query, term) {
   return previous[term.length] <= limit ? previous[term.length] : Infinity;
 }
 
-function filterVocabWords(words, state) {
+function searchVocabWords(words, state) {
   const query = searchText(state.searchQuery);
   const parts = query ? query.split(" ") : [];
+  const scope = state.searchScope || "word";
   const ranked = [];
+  const approximate = [];
   for (const entry of words) {
     if (state.masteryFilter !== -1 && (entry.mastery || 0) !== state.masteryFilter) continue;
     let rank = 0;
@@ -865,26 +867,37 @@ function filterVocabWords(words, state) {
       const name = searchText(entry.word);
       const joinedName = searchText(wordKey(entry.word).replace(/-/g, ""));
       const matchesParts = value => parts.every(part => value.includes(part));
-      if (name === query) rank = 0;
-      else if (name.startsWith(query)) rank = 1;
-      else if (name.includes(query) || matchesParts(name) || joinedName === query) rank = 2;
-      else {
+      const searchName = scope === "word" || scope === "all";
+      if (searchName && name === query) rank = 0;
+      else if (searchName && name.startsWith(query)) rank = 1;
+      else if (searchName && (name.includes(query) || matchesParts(name) || joinedName === query)) rank = 2;
+      else if ((scope === "meaning" || scope === "all") && matchesParts(searchText(entry.meaning))) rank = 7;
+      else if ((scope === "context" || scope === "all") && matchesParts(searchText(entry.contextSentence))) rank = 8;
+      else if (scope === "word") {
         const terms = name.match(/[a-z]+/g) || [];
         const distances = parts.map(part => name.includes(part) ? 0
           : terms.reduce((best, term) => Math.min(best, typoDistance(part, term)), Infinity));
         if (distances.every(Number.isFinite)) {
           const worst = distances.reduce((max, distance) => Math.max(max, distance), 0);
-          rank = 3 + 2 * (worst - 1) + Number(parts.length !== terms.length);
-        } else if (matchesParts(searchText(entry.meaning))) rank = 7;
-        else if (matchesParts(searchText(entry.contextSentence))) rank = 8;
-        else continue;
-      }
+          approximate.push({ entry, rank: 3 + 2 * (worst - 1) + Number(parts.length !== terms.length) });
+        }
+        continue;
+      } else continue;
     }
     ranked.push({ entry, rank });
   }
   const sort = (a, b) => state.sortBy === "alpha" ? a.word.localeCompare(b.word)
     : state.sortBy === "mastery" ? (a.mastery || 0) - (b.mastery || 0) : 0;
-  return ranked.sort((a, b) => a.rank - b.rank || sort(a.entry, b.entry)).map(({ entry }) => entry);
+  // Spelling suggestions are a fallback, never mixed with direct word matches.
+  const results = ranked.length ? ranked : approximate;
+  return {
+    words: results.sort((a, b) => a.rank - b.rank || sort(a.entry, b.entry)).map(({ entry }) => entry),
+    approximate: !ranked.length && approximate.length > 0,
+  };
+}
+
+function filterVocabWords(words, state) {
+  return searchVocabWords(words, state).words;
 }
 
 function createDuplicateCheck(doc, state, btnStyle) {
@@ -1056,7 +1069,8 @@ function renderSidebarView(state) {
 
   // 闪卡模式
   if (state.viewMode === "flashcard") {
-    const filtered = filterVocabWords(scopedWords, state);
+    const results = searchVocabWords(scopedWords, state);
+    const filtered = results.words;
     const deckRow = createHTML(doc, "div", {
       display: "flex",
       gap: "4px",
@@ -1071,7 +1085,7 @@ function renderSidebarView(state) {
       fontSize: "10px",
       color: "#888",
     });
-    deckHint.textContent = "选择复习范围";
+    deckHint.textContent = results.approximate ? "搜索结果：相近拼写" : "选择复习范围";
     deckRow.appendChild(deckFilterBtn);
     deckRow.appendChild(deckHint);
     wrapper.appendChild(deckRow);
@@ -1294,6 +1308,7 @@ function renderSidebarView(state) {
     gap: "4px",
     alignItems: "center",
   });
+  const searchRow = createHTML(doc, "div", { display: "flex", alignItems: "center", gap: "6px" });
 
   const searchInput = createHTML(
     doc,
@@ -1307,7 +1322,8 @@ function renderSidebarView(state) {
     },
     {
       type: "text",
-      placeholder: "🔍 搜索单词/释义/例句...",
+      placeholder: "🔍 搜索单词或词组…",
+      "aria-label": "搜索生词",
       value: state.searchQuery || "",
     }
   );
@@ -1323,6 +1339,31 @@ function renderSidebarView(state) {
   searchInput.addEventListener("compositionstart", () => { composing = true; });
   searchInput.addEventListener("compositionend", () => { composing = false; updateSearch(); });
   searchInput.addEventListener("input", event => { if (!composing && !event.isComposing) updateSearch(); });
+
+  const searchScope = createHTML(doc, "select", { flex: "0 0 78px", width: "78px", minHeight: "28px",
+    fontSize: "11px", padding: "3px", border: "1px solid #ccc", borderRadius: "4px", color: "FieldText", backgroundColor: "Field" },
+  { "aria-label": "搜索范围", title: "选择搜索单词、释义、例句或全文" });
+  const scopes = [["word", "单词", "单词或词组"], ["meaning", "释义", "释义"], ["context", "例句", "例句"], ["all", "全文", "单词、释义或例句"]];
+  for (const [value, label] of scopes) {
+    const option = createHTML(doc, "option", {}, { value });
+    option.textContent = label;
+    searchScope.appendChild(option);
+  }
+  searchScope.value = state.searchScope || "word";
+  const updatePlaceholder = () => {
+    searchInput.placeholder = `🔍 搜索${scopes.find(([value]) => value === searchScope.value)[2]}…`;
+  };
+  updatePlaceholder();
+  searchScope.addEventListener("change", () => {
+    state.searchScope = searchScope.value;
+    state.flashcardIndex = 0;
+    state.flashcardFlipped = false;
+    updatePlaceholder();
+    renderResults();
+    listContainer.scrollTop = 0;
+  });
+  searchRow.append(searchInput, searchScope);
+  wrapper.appendChild(searchRow);
 
   const levelBtn = createHTML(doc, "button", btnStyle);
   levelBtn.title = "切换显示的熟练度：全部 → 生疏 → 熟悉 → 已掌握";
@@ -1342,7 +1383,6 @@ function renderSidebarView(state) {
     renderSidebarContent(state);
   });
 
-  filterRow.appendChild(searchInput);
   filterRow.appendChild(levelBtn);
   filterRow.appendChild(sortBtn);
   const duplicateCheck = createDuplicateCheck(doc, state, btnStyle);
@@ -1360,6 +1400,10 @@ function renderSidebarView(state) {
   const c1 = scopedWords.filter((w) => w.mastery === 1).length;
   const c2 = scopedWords.filter((w) => w.mastery === 2).length;
   wrapper.appendChild(statBar);
+  const searchNotice = createHTML(doc, "div", { fontSize: "11px", color: "GrayText" },
+    { role: "status", "data-vocab-search-notice": "true" });
+  searchNotice.hidden = true;
+  wrapper.appendChild(searchNotice);
 
   const listContainer = createHTML(doc, "div", {
     display: "flex",
@@ -1370,8 +1414,11 @@ function renderSidebarView(state) {
   }, { "data-vocab-results": "true" });
 
   function renderResults() {
-    const filtered = filterVocabWords(scopedWords, state);
+    const results = searchVocabWords(scopedWords, state);
+    const filtered = results.words;
     statBar.textContent = `显示 ${filtered.length} 词 | 🔴${c0}  🟡${c1}  🟢${c2}`;
+    searchNotice.hidden = !results.approximate;
+    searchNotice.textContent = results.approximate ? "未找到直接匹配，以下是相近拼写。" : "";
     listContainer.replaceChildren(buildVocabCards(doc, filtered, allWords.length));
   }
   renderResults();
@@ -1633,6 +1680,7 @@ async function startup({ id, version, rootURI }) {
           masteryFilter: -1,
           sortBy: "date",
           searchQuery: "",
+          searchScope: "word",
           flashcardIndex: 0,
           flashcardFlipped: false,
         };
