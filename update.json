@@ -3,9 +3,9 @@
     "vocab-book@custom.zotero.org": {
       "updates": [
         {
-          "version": "2.6.2",
-          "update_link": "https://github.com/RedkieZhang717/vocabu_text/releases/download/v2.6.2/zotero-vocab-book.xpi",
-          "update_hash": "sha256:15ce51b06b881f7670e2875f5d3d23a979d3621936673ec4dee571e6a2158fbf",
+          "version": "2.6.3",
+          "update_link": "https://github.com/RedkieZhang717/vocabu_text/releases/download/v2.6.3/zotero-vocab-book.xpi",
+          "update_hash": "sha256:09f06eae84f8607cf4b2dbbcb6a37977d235451100a608d7899c50e66c7f9f87",
           "applications": {
             "zotero": {
               "strict_min_version": "6.999",

@@ -91,6 +91,75 @@ test('search and manual add update the visible list', async () => {
   assert.match(state.body.textContent, /gamma/);
 });
 
+test('search ranks headwords over definitions and examples, and tolerates a spelling swap', () => {
+  const { state, dom } = harness([
+    { ...word('source'), contextSentence: 'We found evidence.' },
+    { ...word('proof'), meaning: 'evidence; 证据' },
+    word('evidence base'), word('evidence'), word('event'),
+    word('café'), word('well-known'), word('in terms of'),
+  ]);
+  const input = state.body.querySelector('input[placeholder^="🔍"]');
+  const search = value => {
+    input.value = value;
+    input.dispatchEvent(new dom.window.Event('input'));
+    return [...state.body.querySelectorAll('strong')].map(node => node.textContent);
+  };
+  assert.deepEqual(search('  ＥＶＩＤＥＮＣＥ  '), ['evidence', 'evidence base', 'proof', 'source']);
+  assert.deepEqual(search('evidnece'), ['evidence', 'evidence base']);
+  assert.deepEqual(search('证据'), ['proof']);
+  assert.deepEqual(search('wellknown'), ['well-known']);
+  assert.deepEqual(search('cafe'), ['café']);
+  assert.deepEqual(search('in   trms'), ['in terms of']);
+  assert.deepEqual(search('evd'), []);
+});
+
+test('composing a Chinese query keeps the input, caret and Zotero sidebar mount stable', async () => {
+  const { context, state, dom, hooks } = harness([{ ...word('evidence'), meaning: '证据' }, word('other')]);
+  await context.startup({});
+  const input = state.body.querySelector('input[placeholder^="🔍"]');
+  input.focus();
+  input.dispatchEvent(new dom.window.CompositionEvent('compositionstart'));
+  input.value = 'zheng';
+  input.dispatchEvent(new dom.window.InputEvent('input', { isComposing: true }));
+  hooks().onRender({ body: state.body, item: state.item });
+  assert.equal(state.body.querySelectorAll('strong').length, 2);
+  input.value = '证据'; input.setSelectionRange(1, 1);
+  input.dispatchEvent(new dom.window.CompositionEvent('compositionend'));
+  assert.equal(dom.window.document.activeElement, input);
+  assert.equal(input.selectionStart, 1);
+  assert.equal(state.body.querySelector('strong').textContent, 'evidence');
+  assert.equal(state.body.querySelectorAll('strong').length, 1);
+});
+
+test('checking duplicates is read-only until merge and then preserves definitions, notes and both PDF sources', () => {
+  const locA = { itemID: 1, attachmentID: 10, pageIndex: 0, position: { pageIndex: 0, rects: [[1, 2, 3, 4]] } };
+  const locB = { itemID: 2, attachmentID: 20, pageIndex: 2 };
+  const list = [
+    { ...word('Well-known', 1), ...locA, meaning: '众所周知', meaningEdited: true, note: '甲', reviewCount: 2 },
+    { ...word('well‑known', 2), locations: [locA, locB], meaning: '著名', note: '乙', reviewCount: 3 },
+    word('wellknown'),
+  ];
+  const { context, state, prefs } = harness(list);
+  state.onlyCurrentPaper = true;
+  state.item = { id: 1, isRegularItem: () => true, getField: () => 'Paper' };
+  context.renderSidebarContent(state);
+  button(state.body, '检查重复').click();
+  assert.match(state.body.querySelector('[data-vocab-duplicate-results]').textContent, /全库发现 1 组.*2 条/);
+  assert.equal(prefs.get('extensions.vocabbook.words'), JSON.stringify(list));
+  button(state.body, '合并这些重复词').click();
+  const stored = context.getVocabList();
+  assert.equal(stored.length, 2);
+  assert.equal(stored[0].meaning, '众所周知\n著名');
+  assert.equal(stored[0].meaningEdited, true);
+  assert.equal(stored[0].note, '甲\n\n乙');
+  assert.equal(stored[0].mastery, 2);
+  assert.equal(stored[0].reviewCount, 5);
+  assert.equal(stored[0].locations.length, 2);
+  assert.equal(JSON.stringify(context.getWordsForPaper(stored, 1)[0].position), JSON.stringify(locA.position));
+  assert.equal(context.getWordsForPaper(stored, 2)[0].attachmentID, 20);
+  assert.match(state.body.querySelector('[data-vocab-duplicate-results]').textContent, /已合并 1 组/);
+});
+
 test('existing credentials are preserved and missing credentials stay unset', () => {
   const { context, prefs } = harness();
   assert.equal(context.getBaiduCredentials().raw, '');
@@ -343,6 +412,48 @@ async function popupFor(h, text, options = {}, reader = {}) {
   return popup;
 }
 const tick = () => new Promise(resolve => setImmediate(resolve));
+
+test('automatic translation reserves space on the first paint and does not eagerly build collection controls', async () => {
+  const h = harness();
+  let finish;
+  const lookup = () => new Promise(resolve => { finish = resolve; });
+  const doc = h.dom.window.document;
+  let popup, initial;
+  await h.context.renderSelectionPopup({ reader: {}, doc,
+    params: { annotation: { text: 'evidence' } }, append: node => {
+      popup = node;
+      const result = node.querySelector('[role="status"]');
+      initial = { height: result.style.height, hidden: result.hidden, text: result.textContent };
+      doc.body.appendChild(node);
+    } }, { lookup });
+  assert.equal(initial.hidden, false);
+  assert.match(initial.text, /查询/);
+  assert.ok(initial.height);
+  assert.equal(popup.querySelector('[data-vocab-word-picker]'), null);
+  finish({ ok: true, combinedMeaning: '大量释义\n'.repeat(40) });
+  await tick();
+  const result = popup.querySelector('[role="status"]');
+  assert.match(result.textContent, /大量释义/);
+  assert.equal(result.style.height, initial.height);
+  assert.equal(result.style.overflowY, 'auto');
+  popup.querySelector('[aria-controls]').click();
+  assert.ok(popup.querySelector('[data-vocab-word-picker]'));
+});
+
+test('an already collected spelling is marked in the picker and adding it only adds a source', async () => {
+  const h = harness([{ ...word('State-of-the-art', 2), itemID: 8, meaning: '最先进', reviewCount: 4 }]);
+  h.prefs.set('extensions.vocabbook.autoTranslate', false);
+  const popup = await popupFor(h, 'state‑of‑the‑art', { lookup: () => assert.fail('should reuse the saved meaning') }, { itemID: 41 });
+  popup.querySelector('[aria-controls]').click();
+  assert.ok(popup.querySelector('[aria-label="state‑of‑the‑art，已收录"]'));
+  button(popup, '加入 1').click();
+  await tick();
+  const stored = h.context.getVocabList();
+  assert.equal(stored.length, 1);
+  assert.equal(stored[0].meaning, '最先进');
+  assert.equal(stored[0].reviewCount, 4);
+  assert.equal(stored[0].locations[1].attachmentID, 41);
+});
 
 test('collecting a single word with auto-translation off queries on save, including an empty legacy meaning', async () => {
   const h = harness([{word:'evidence',meaning:''}]);
